@@ -1,4 +1,4 @@
-package magnetbatch
+package audiobookfetch
 
 import (
 	"fmt"
@@ -6,7 +6,8 @@ import (
 	"strings"
 )
 
-// The pipeline: wanted book -> search -> score -> check the top few -> magnet.
+// Finding: wanted book -> search every source -> score -> inspect the top
+// few -> the best listing's magnet link.
 
 const (
 	StatusMatched       = "matched"
@@ -15,19 +16,13 @@ const (
 	StatusError         = "error"
 )
 
-// Source is where listings come from. *Client is the real one.
-type Source interface {
-	Search(query string, page int) ([]*Candidate, error)
-	Details(c *Candidate) error
-}
-
 // Options tune how a match is chosen.
 type Options struct {
 	MinScore    float64 // at or above: a trusted match
 	Floor       float64 // below: not worth a details request
 	Top         int     // how many front-runners get their details page checked
 	CloseMargin float64 // ...but only those within this of the leader
-	EarlyStop   float64 // skip broader searches once a hit is this good
+	EarlyStop   float64 // skip broader searches and further sources once a hit is this good
 	Pages       int     // result pages per search
 	Language    string  // only this language is considered; "" means any
 	QualityTie  float64 // matches within this of the best compete on audio quality
@@ -57,33 +52,12 @@ type Result struct {
 	Note      string     `json:"note"`
 }
 
-// ParseList reads one book per line: "Title | Author". The author is
-// optional, a tab works in place of the pipe, and lines starting with # are
-// comments.
-func ParseList(text string) []Wanted {
-	var out []Wanted
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(strings.TrimPrefix(line, "\xef\xbb\xbf"))
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		title, author := line, ""
-		for _, sep := range []string{"|", "\t"} {
-			if before, after, found := strings.Cut(line, sep); found {
-				title, author = before, after
-				break
-			}
-		}
-		if title = strings.TrimSpace(title); title != "" {
-			out = append(out, Wanted{Title: title, Author: strings.TrimSpace(author), Raw: line})
-		}
-	}
-	return out
-}
-
+// scored is a candidate with its score and the source that can tell us more
+// about it.
 type scored struct {
 	score Score
 	cand  *Candidate
+	from  Source
 }
 
 func byScore(list []scored) {
@@ -119,39 +93,59 @@ func wrongLanguage(c *Candidate, wanted string) bool {
 	return wanted != "" && c.Language != "" && normalize(c.Language) != normalize(wanted)
 }
 
-// FindMagnet searches for one book and picks the best listing on its own.
-func FindMagnet(w Wanted, src Source, opts Options) Result {
-	result, err := find(w, src, opts)
+// Find searches the sources for one book and picks the best listing on its
+// own. Sources are tried in the order given; once one yields a near-certain
+// match the rest are not asked.
+func Find(w Wanted, sources []Source, opts Options) Result {
+	result, err := find(w, sources, opts)
 	if err != nil {
 		return Result{Wanted: w, Status: StatusError, Note: err.Error()}
+	}
+	if result.Status == StatusMatched {
+		return result
+	}
+	// The line had no explicit separator, so its title and author were a
+	// guess. Before settling for a weak match, try the other readings.
+	for _, reading := range alternates(w) {
+		other, err := find(reading, sources, opts)
+		if err != nil || other.Score <= result.Score {
+			continue
+		}
+		read := "read as title '" + reading.Title + "'"
+		if reading.Author != "" {
+			read += ", author '" + reading.Author + "'"
+		}
+		other.Wanted = w
+		other.Note = strings.TrimSuffix(read+"; "+other.Note, "; ")
+		result = other
+		if result.Status == StatusMatched {
+			break
+		}
 	}
 	return result
 }
 
-func find(w Wanted, src Source, opts Options) (Result, error) {
-	var pool []scored
-	seen := map[string]bool{}
-	best := 0.0
-	otherLanguage := 0
-
+// search gathers and scores candidates from one source into pool.
+func search(w Wanted, src Source, opts Options, seen map[string]bool, pool *[]scored, otherLanguage *int) (best float64, err error) {
 	for _, query := range BuildQueries(w) {
 		for page := 1; page <= max(1, opts.Pages); page++ {
 			hits, err := src.Search(query, page)
 			if err != nil {
-				return Result{}, err
+				return best, err
 			}
 			for _, c := range hits {
 				if seen[c.URL] {
 					continue
 				}
 				seen[c.URL] = true
+				c.Source = src.Name()
 				if wrongLanguage(c, opts.Language) {
-					otherLanguage++
+					*otherLanguage++
 					continue
 				}
 				s := ScoreCandidate(w, c, opts.Language)
 				best = max(best, s.Total)
-				pool = append(pool, scored{s, c})
+				*pool = append(*pool, scored{s, c, src})
 			}
 			if len(hits) == 0 {
 				break
@@ -161,14 +155,37 @@ func find(w Wanted, src Source, opts Options) (Result, error) {
 			break
 		}
 	}
+	return best, nil
+}
 
+func find(w Wanted, sources []Source, opts Options) (Result, error) {
+	var pool []scored
+	seen := map[string]bool{}
+	otherLanguage := 0
+
+	// One source failing is not fatal while another can still answer.
+	var lastErr error
+	for _, src := range sources {
+		best, err := search(w, src, opts, seen, &pool, &otherLanguage)
+		if err != nil {
+			lastErr = fmt.Errorf("%s: %w", src.Name(), err)
+			continue
+		}
+		if best >= opts.EarlyStop {
+			break
+		}
+	}
 	if len(pool) == 0 {
+		if lastErr != nil {
+			return Result{}, lastErr
+		}
 		note := "no search results"
 		if otherLanguage > 0 {
 			note = fmt.Sprintf("only found in other languages (%d listings)", otherLanguage)
 		}
 		return Result{Wanted: w, Status: StatusNotFound, Note: note}, nil
 	}
+
 	byScoreThenQuality(pool, opts.QualityTie, opts.MinScore)
 	leader := pool[0]
 	if leader.score.Total < opts.Floor {
@@ -177,10 +194,11 @@ func find(w Wanted, src Source, opts Options) (Result, error) {
 			Note: "closest was '" + leader.cand.Heading + "'"}, nil
 	}
 
-	// The details page knows things search doesn't (the real author list,
-	// abridged or not, the hash), so re-score the front-runners with it
-	// before choosing. The pool is already ordered best match first, best
-	// audio first among equals, so these are the best-sounding good matches.
+	// A listing's own page knows things its search result doesn't (the real
+	// author list, abridged or not, the hash), so re-score the front-runners
+	// with it before choosing. The pool is already ordered best match first,
+	// best audio first among equals, so these are the best-sounding good
+	// matches.
 	leaderScore := leader.score.Total
 	for _, entry := range pool {
 		leaderScore = max(leaderScore, entry.score.Total)
@@ -191,15 +209,19 @@ func find(w Wanted, src Source, opts Options) (Result, error) {
 			others = append(others, entry)
 			continue
 		}
-		if err := src.Details(entry.cand); err != nil {
-			return Result{}, err
+		if err := entry.from.Details(entry.cand); err != nil {
+			lastErr = fmt.Errorf("%s: %w", entry.from.Name(), err)
+			continue
 		}
 		if entry.cand.InfoHash == "" {
 			continue
 		}
-		finalists = append(finalists, scored{ScoreCandidate(w, entry.cand, opts.Language), entry.cand})
+		finalists = append(finalists, scored{ScoreCandidate(w, entry.cand, opts.Language), entry.cand, entry.from})
 	}
 	if len(finalists) == 0 {
+		if lastErr != nil {
+			return Result{}, lastErr
+		}
 		return Result{Wanted: w, Status: StatusNotFound, Score: leader.score.Total,
 			Breakdown: &leader.score, Candidate: leader.cand,
 			Note: "best matches had no hash on their page"}, nil
@@ -228,18 +250,4 @@ func find(w Wanted, src Source, opts Options) (Result, error) {
 		RunnersUp: runnersUp,
 		Note:      strings.Join(winner.score.Notes, "; "),
 	}, nil
-}
-
-// FindMagnets runs FindMagnet over a list, calling onResult (if not nil)
-// after each one.
-func FindMagnets(list []Wanted, src Source, opts Options, onResult func(int, Result)) []Result {
-	results := make([]Result, 0, len(list))
-	for i, w := range list {
-		r := FindMagnet(w, src, opts)
-		if onResult != nil {
-			onResult(i, r)
-		}
-		results = append(results, r)
-	}
-	return results
 }

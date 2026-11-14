@@ -1,6 +1,6 @@
-module magnetbatch
+module github.com/broots144/audiobook-fetch
 
-go 1.27.4
+go 1.27
 
 require (
 	github.com/PuerkitoBio/goquery v1.13.0

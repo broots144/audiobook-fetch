@@ -1,0 +1,480 @@
+package audiobookfetch
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Downloading: magnet links -> a Downloader -> files in a folder.
+//
+// The run can be repeated safely. Items already on the service are not
+// added twice, finished files are skipped, and half-finished files continue
+// from where they stopped.
+
+const (
+	DownloadDone      = "downloaded"
+	DownloadNotCached = "skipped_not_cached"
+	DownloadNotReady  = "not_ready"
+	DownloadFailed    = "failed"
+
+	partSuffix         = ".part"
+	fileAttempts       = 4
+	illegalInFileNames = `<>:"|?*`
+)
+
+// DownloadOptions control one download run.
+type DownloadOptions struct {
+	Dest        string        // folder the files go into
+	CachedOnly  bool          // don't add links the service would have to fetch first
+	RemoveAfter bool          // remove an item from the service once all its files are here (only items this tool added)
+	Parallel    int           // files downloaded at once
+	Wait        time.Duration // how long to wait for the service to finish fetching
+	Poll        time.Duration // how often to check on items the service is still fetching
+	Idle        time.Duration // give up on a connection that sends nothing for this long
+	Log         func(format string, args ...any)
+	OnBytes     func(n int64) // called as data arrives, for progress display
+
+	sleep func(time.Duration)
+	now   func() time.Time
+}
+
+// DefaultDownloadOptions are the settings the CLI starts from.
+func DefaultDownloadOptions() DownloadOptions {
+	return DownloadOptions{Parallel: 3, Wait: time.Hour, Poll: 20 * time.Second, Idle: 90 * time.Second}
+}
+
+// DownloadResult is the outcome for one magnet link.
+type DownloadResult struct {
+	Hash    string `json:"hash"`
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Files   int    `json:"files"`   // files now complete on disk
+	Fetched int    `json:"fetched"` // of those, how many this run downloaded
+	Bytes   int64  `json:"bytes"`   // bytes this run downloaded
+	Size    int64  `json:"size"`    // total size of the item's files
+	Removed bool   `json:"removed"` // removed from the service afterwards
+	Note    string `json:"note,omitempty"`
+}
+
+// BookkeepingDir is the folder the tool keeps its own files in, inside a
+// download folder: the record of what it added to the service, and its reports.
+func BookkeepingDir(dest string) string { return filepath.Join(dest, "."+AppName) }
+
+// state remembers which items this tool put on the service, so that removing
+// afterwards can never touch anything that was already in the account.
+type state struct {
+	Added map[string]bool `json:"added"`
+	path  string
+}
+
+func loadState(dest string, service Downloader) *state {
+	name := strings.ToLower(strings.ReplaceAll(service.Name(), " ", "-")) + "-state.json"
+	s := &state{Added: map[string]bool{}, path: filepath.Join(BookkeepingDir(dest), name)}
+	if data, err := os.ReadFile(s.path); err == nil {
+		_ = json.Unmarshal(data, s)
+	}
+	if s.Added == nil {
+		s.Added = map[string]bool{}
+	}
+	return s
+}
+
+func (s *state) save() error {
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.path)
+}
+
+// Download sends every magnet to the service and brings the files home.
+func Download(service Downloader, magnets []Magnet, opts DownloadOptions) ([]DownloadResult, error) {
+	if opts.Log == nil {
+		opts.Log = func(string, ...any) {}
+	}
+	if opts.OnBytes == nil {
+		opts.OnBytes = func(int64) {}
+	}
+	if opts.sleep == nil {
+		opts.sleep = time.Sleep
+	}
+	if opts.now == nil {
+		opts.now = time.Now
+	}
+	opts.Parallel = max(1, opts.Parallel)
+	if err := os.MkdirAll(BookkeepingDir(opts.Dest), 0o755); err != nil {
+		return nil, err
+	}
+	st := loadState(opts.Dest, service)
+	name := service.Name()
+
+	account, err := service.List()
+	if err != nil {
+		return nil, err
+	}
+	present := indexByHash(account)
+
+	var missing []string
+	for _, m := range magnets {
+		if _, ok := present[m.Hash]; !ok {
+			missing = append(missing, m.Hash)
+		}
+	}
+	cached := map[string]bool{}
+	if len(missing) > 0 {
+		if cached, err = service.CheckCached(missing); err != nil {
+			return nil, err
+		}
+	}
+
+	results := make([]DownloadResult, len(magnets))
+	pending := map[int]bool{}
+	addedAny := false
+	for i, m := range magnets {
+		results[i] = DownloadResult{Hash: m.Hash}
+		if _, ok := present[m.Hash]; ok {
+			pending[i] = true
+			continue
+		}
+		if opts.CachedOnly && !cached[m.Hash] {
+			results[i].Status, results[i].Note = DownloadNotCached, name+" does not have it cached"
+			opts.Log("[%d/%d] %s  skipped: not cached on %s", i+1, len(magnets), short(m.Hash), name)
+			continue
+		}
+		if err := service.Add(m.URI); err != nil {
+			results[i].Status, results[i].Note = DownloadFailed, "could not add to "+name+": "+err.Error()
+			opts.Log("[%d/%d] %s  could not add: %v", i+1, len(magnets), short(m.Hash), err)
+			continue
+		}
+		st.Added[m.Hash] = true
+		if err := st.save(); err != nil {
+			return nil, err
+		}
+		pending[i] = true
+		addedAny = true
+	}
+
+	// The listing taken above predates anything just added, so take a new
+	// one first in that case: cached links are ready the moment they are
+	// added, and should not sit through a whole poll interval.
+	deadline := opts.now().Add(opts.Wait)
+	for refresh := addedAny; len(pending) > 0; refresh = true {
+		if refresh {
+			if account, err = service.List(); err != nil {
+				return results, err
+			}
+			present = indexByHash(account)
+		}
+		for i, m := range magnets {
+			if !pending[i] {
+				continue
+			}
+			item, ok := present[m.Hash]
+			if !ok || !item.Ready || len(item.Files) == 0 {
+				continue
+			}
+			delete(pending, i)
+			results[i] = fetchItem(service, item, st, opts)
+			r := results[i]
+			opts.Log("[%d/%d] %s  %s: %d files, %s%s  %s", i+1, len(magnets), short(m.Hash), r.Status,
+				r.Files, humanBytes(r.Size), removedNote(r, name), r.Name)
+		}
+		if len(pending) == 0 {
+			break
+		}
+		if !opts.now().Before(deadline) {
+			for i, m := range magnets {
+				if !pending[i] {
+					continue
+				}
+				results[i].Status = DownloadNotReady
+				results[i].Note = name + " has not finished fetching it; run again later"
+				if item, ok := present[m.Hash]; ok {
+					results[i].Name = item.Name
+					results[i].Note = fmt.Sprintf("%s is still fetching it (%s, %.0f%%); run again later",
+						name, item.State, item.Progress*100)
+				}
+				opts.Log("[%d/%d] %s  not ready: %s", i+1, len(magnets), short(m.Hash), results[i].Note)
+			}
+			break
+		}
+		opts.Log("waiting on %s for %d item(s)...", name, len(pending))
+		opts.sleep(opts.Poll)
+	}
+	return results, nil
+}
+
+func indexByHash(items []Item) map[string]Item {
+	out := make(map[string]Item, len(items))
+	for _, item := range items {
+		out[strings.ToLower(item.Hash)] = item
+	}
+	return out
+}
+
+func short(hash string) string { return hash[:min(8, len(hash))] }
+
+func removedNote(r DownloadResult, service string) string {
+	if r.Removed {
+		return ", removed from " + service
+	}
+	return ""
+}
+
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGT"[exp])
+}
+
+// fetchItem downloads every file of one ready item, a few at a time.
+func fetchItem(service Downloader, item Item, st *state, opts DownloadOptions) DownloadResult {
+	hash := strings.ToLower(item.Hash)
+	result := DownloadResult{Hash: hash, Name: item.Name}
+
+	var (
+		mu     sync.Mutex
+		wg     sync.WaitGroup
+		slots  = make(chan struct{}, opts.Parallel)
+		errs   []string
+		client = &http.Client{}
+	)
+	for _, file := range item.Files {
+		result.Size += file.Size
+		path, err := localPath(opts.Dest, item, file)
+		if err != nil {
+			errs = append(errs, err.Error())
+			continue
+		}
+		wg.Add(1)
+		slots <- struct{}{}
+		go func(file File, path string) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			written, fetched, err := fetchFile(service, client, item, file, path, opts)
+			mu.Lock()
+			defer mu.Unlock()
+			result.Bytes += written
+			if err != nil {
+				errs = append(errs, err.Error())
+				return
+			}
+			result.Files++
+			if fetched {
+				result.Fetched++
+			}
+		}(file, path)
+	}
+	wg.Wait()
+
+	if len(errs) > 0 {
+		result.Status = DownloadFailed
+		result.Note = fmt.Sprintf("%d of %d files failed; first: %s", len(errs), len(item.Files), errs[0])
+		return result
+	}
+	result.Status = DownloadDone
+
+	name := service.Name()
+	switch {
+	case !opts.RemoveAfter:
+	case !st.Added[hash]:
+		result.Note = "left on " + name + ": it was already in your account"
+	default:
+		if err := service.Remove(item); err != nil {
+			result.Note = "downloaded, but could not remove from " + name + ": " + err.Error()
+			break
+		}
+		result.Removed = true
+		delete(st.Added, hash)
+		if err := st.save(); err != nil {
+			result.Note = "removed from " + name + ", but could not update the state file: " + err.Error()
+		}
+	}
+	return result
+}
+
+// localPath maps a file to a path under dest, refusing anything that would
+// land outside it and replacing characters that network shares reject.
+func localPath(dest string, item Item, file File) (string, error) {
+	var parts []string
+	for _, part := range strings.FieldsFunc(file.Path, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part = cleanSegment(part); part != "" {
+			parts = append(parts, part)
+		}
+	}
+	if len(parts) == 0 {
+		return "", fmt.Errorf("file %s has no usable name", file.ID)
+	}
+	if len(parts) == 1 { // a bare file: keep it in a folder named after its item
+		folder := cleanSegment(item.Name)
+		if folder == "" {
+			folder = short(strings.ToLower(item.Hash))
+		}
+		parts = append([]string{folder}, parts...)
+	}
+	path := filepath.Join(append([]string{dest}, parts...)...)
+	if rel, err := filepath.Rel(dest, path); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("file %s would be written outside the destination", file.ID)
+	}
+	return path, nil
+}
+
+func cleanSegment(segment string) string {
+	segment = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || strings.ContainsRune(illegalInFileNames, r) {
+			return '_'
+		}
+		return r
+	}, segment)
+	segment = strings.TrimRight(strings.TrimSpace(segment), ". ")
+	if segment == "." || segment == ".." {
+		return ""
+	}
+	return segment
+}
+
+var urlQuery = regexp.MustCompile(`\?[^\s"']+`)
+
+// withoutSecrets strips query strings from any URL in an error. Download
+// links carry tokens there, and errors end up in logs and reports.
+func withoutSecrets(err error) error {
+	if err == nil {
+		return nil
+	}
+	return errors.New(urlQuery.ReplaceAllString(err.Error(), "?…"))
+}
+
+// fetchFile gets one file onto disk. fetched is false when it was already
+// complete. A fresh link is requested for every attempt.
+func fetchFile(service Downloader, client *http.Client, item Item, file File, path string, opts DownloadOptions) (written int64, fetched bool, err error) {
+	if info, statErr := os.Stat(path); statErr == nil && info.Mode().IsRegular() && info.Size() == file.Size {
+		return 0, false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return 0, false, err
+	}
+	for attempt := 1; attempt <= fileAttempts; attempt++ {
+		var link string
+		if link, err = service.Link(item, file); err == nil {
+			var n int64
+			n, err = fetchTo(client, link, path+partSuffix, file.Size, opts.Idle, opts.OnBytes)
+			written += n
+			if err == nil {
+				if err = os.Rename(path+partSuffix, path); err == nil {
+					return written, true, nil
+				}
+			}
+		}
+		if attempt < fileAttempts {
+			opts.sleep(time.Duration(attempt) * 5 * time.Second)
+		}
+	}
+	return written, false, fmt.Errorf("%s: %w", filepath.Base(path), withoutSecrets(err))
+}
+
+// fetchTo downloads link into part, continuing from whatever part already
+// holds, and checks the result is exactly want bytes long.
+func fetchTo(client *http.Client, link, part string, want int64, idle time.Duration, onBytes func(int64)) (written int64, err error) {
+	var have int64
+	if info, statErr := os.Stat(part); statErr == nil {
+		have = info.Size()
+	}
+	if have > want {
+		have = 0 // not a prefix of this file; start over
+	}
+	if have == want {
+		if have == 0 {
+			return 0, os.WriteFile(part, nil, 0o644)
+		}
+		return 0, nil
+	}
+
+	// One stalled connection must not hang the whole run.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if idle <= 0 {
+		idle = 90 * time.Second
+	}
+	watchdog := time.AfterFunc(idle, cancel)
+	defer watchdog.Stop()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, nil)
+	if err != nil {
+		return 0, err
+	}
+	if have > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	flags := os.O_CREATE | os.O_WRONLY
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		flags |= os.O_APPEND
+	case http.StatusOK: // server ignored the range: take it from the top
+		flags |= os.O_TRUNC
+		have = 0
+	default:
+		return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	out, err := os.OpenFile(part, flags, 0o644)
+	if err != nil {
+		return 0, err
+	}
+
+	buf := make([]byte, 256<<10)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			watchdog.Reset(idle)
+			if _, writeErr := out.Write(buf[:n]); writeErr != nil {
+				out.Close()
+				return written, writeErr
+			}
+			written += int64(n)
+			onBytes(int64(n))
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			out.Close()
+			if errors.Is(readErr, context.Canceled) {
+				readErr = fmt.Errorf("connection stalled for %s", idle)
+			}
+			return written, readErr
+		}
+	}
+	if err := out.Close(); err != nil {
+		return written, err
+	}
+	if got := have + written; got != want {
+		return written, fmt.Errorf("got %d bytes, expected %d", got, want)
+	}
+	return written, nil
+}

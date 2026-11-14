@@ -1,4 +1,4 @@
-package magnetbatch
+package audiobookfetch
 
 import (
 	"errors"
@@ -84,21 +84,71 @@ func TestDetailsAuthorsRescueAHeadingWithoutAuthor(t *testing.T) {
 	}
 }
 
-func TestParseList(t *testing.T) {
-	got := ParseList("# my books\n\nDune | Frank Herbert\n  The Hobbit|J.R.R. Tolkien  \nNo Author Here\nTabbed\tSome One\n | orphan author\n")
-	want := []Wanted{
-		{"Dune", "Frank Herbert", "Dune | Frank Herbert"},
-		{"The Hobbit", "J.R.R. Tolkien", "The Hobbit|J.R.R. Tolkien"},
-		{"No Author Here", "", "No Author Here"},
-		{"Tabbed", "Some One", "Tabbed\tSome One"},
+func TestParseListAcceptsManyShapes(t *testing.T) {
+	type book struct{ title, author string }
+	want := []book{{"Dune", "Frank Herbert"}, {"The Hobbit", "J.R.R. Tolkien"}, {"No Author Here", ""}}
+	lists := map[string]string{
+		"pipes":         "# my books\n\nDune | Frank Herbert\n  The Hobbit|J.R.R. Tolkien  \nNo Author Here\n | orphan author\n",
+		"pipes+heading": "Title | Author\nDune | Frank Herbert\nThe Hobbit | J.R.R. Tolkien\nNo Author Here\n",
+		"tabs":          "Dune\tFrank Herbert\nThe Hobbit\tJ.R.R. Tolkien\nNo Author Here\n",
+		"by":            "1. Dune by Frank Herbert\n2. The Hobbit by J.R.R. Tolkien\n3. No Author Here\n",
+		"dashes":        "- Dune - Frank Herbert\n- The Hobbit – J.R.R. Tolkien\n- No Author Here\n",
+		"csv":           "Title,Author,Year\nDune,Frank Herbert,1965\n\"The Hobbit\",\"J.R.R. Tolkien\",1937\nNo Author Here,,\n",
+		"csv reordered": "Rating,Authors,Book Title\n5,Frank Herbert,Dune\n4,J.R.R. Tolkien,The Hobbit\n3,,No Author Here\n",
+		"tsv":           "title\tauthor\nDune\tFrank Herbert\nThe Hobbit\tJ.R.R. Tolkien\nNo Author Here\t\n",
+		"json objects":  `[{"title":"Dune","author":"Frank Herbert"},{"Title":"The Hobbit","Authors":["J.R.R. Tolkien"]},{"name":"No Author Here"}]`,
+		"json strings":  `["Dune | Frank Herbert", "The Hobbit by J.R.R. Tolkien", "No Author Here"]`,
+		"json wrapped":  `{"books":[{"title":"Dune","author":{"name":"Frank Herbert"}},{"title":"The Hobbit","author":"J.R.R. Tolkien"},{"title":"No Author Here"}]}`,
 	}
-	if len(got) != len(want) {
-		t.Fatalf("got %d entries, want %d: %+v", len(got), len(want), got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("entry %d = %+v, want %+v", i, got[i], want[i])
+	for name, text := range lists {
+		books, magnets := ParseList(text)
+		if len(magnets) != 0 || len(books) != len(want) {
+			t.Errorf("%s: got %d books and %d magnets: %+v", name, len(books), len(magnets), books)
+			continue
 		}
+		for i, w := range want {
+			if books[i].Title != w.title || books[i].Author != w.author {
+				t.Errorf("%s: book %d = %q | %q, want %q | %q", name, i, books[i].Title, books[i].Author, w.title, w.author)
+			}
+		}
+	}
+}
+
+func TestParseListKeepsTrickyTitlesAndMagnets(t *testing.T) {
+	text := "1984\n2001: A Space Odyssey | Arthur C. Clarke\nStand by Me 2: The Return\n" +
+		"magnet:?xt=urn:btih:" + hashA + "&dn=x\nmagnet:?xt=urn:btih:" + hashA + "&dn=again\nCatch-22 | Joseph Heller\n"
+	books, magnets := ParseList(text)
+	titles := []string{"1984", "2001: A Space Odyssey", "Stand by Me 2: The Return", "Catch-22"}
+	if len(books) != len(titles) || len(magnets) != 1 || magnets[0].Hash != hashA {
+		t.Fatalf("books %+v, magnets %+v", books, magnets)
+	}
+	for i, title := range titles {
+		if books[i].Title != title || books[i].Guess != "" {
+			t.Errorf("book %d = %+v, want title %q read literally", i, books[i], title)
+		}
+	}
+}
+
+func TestGuessedLinesAreRetriedAnotherWay(t *testing.T) {
+	// "Author - Title" order: the first reading finds nothing good, the swap does.
+	src := &fakeSource{
+		listings: map[string][]Candidate{"Dune Herbert": {{Heading: "Dune - Frank Herbert", URL: "u/1", Language: "English"}}},
+		details:  map[string]Candidate{"u/1": {Authors: []string{"Frank Herbert"}, InfoHash: "abc"}},
+	}
+	books, _ := ParseList("Frank Herbert - Dune\n")
+	r := Find(books[0], []Source{src}, DefaultOptions())
+	if r.Status != StatusMatched || r.Wanted.Raw != "Frank Herbert - Dune" || !strings.Contains(r.Note, "read as title 'Dune'") {
+		t.Errorf("status %s (%.2f), wanted %+v, note %q", r.Status, r.Score, r.Wanted, r.Note)
+	}
+
+	// "Title by Something" where the whole line is the title.
+	src = &fakeSource{
+		listings: map[string][]Candidate{"Stand by Me": {{Heading: "Stand by Me - Some Writer", URL: "u/2", Language: "English"}}},
+		details:  map[string]Candidate{"u/2": {Authors: []string{"Some Writer"}, InfoHash: "def"}},
+	}
+	books, _ = ParseList("Stand by Me\n")
+	if r = Find(books[0], []Source{src}, DefaultOptions()); r.Status != StatusMatched {
+		t.Errorf("status %s (%.2f), note %q, searches %v", r.Status, r.Score, r.Note, src.searches)
 	}
 }
 
@@ -131,78 +181,21 @@ func TestBuildMagnet(t *testing.T) {
 	}
 }
 
-const searchHTML = `<div id="content">
-<div class="post"><div class="postTitle"><h2><a href="/abss/first-book/" rel="bookmark">First Book - Ann Author</a></h2></div>
-<div class="postInfo">Category: Adults&nbsp; Classic&nbsp; <br />Language: English<span>Keywords: One&nbsp Two&nbsp </span><br /></div>
-<div class="postContent"><p>Shared by:<a href="/member">someone</a></p>
-<p>Posted: 16 Dec 2025<br />Format: <span>M4B</span> / Bitrate: <span>64 Kbps</span><br />File Size: <span>419.23</span> MBs</p></div></div>
-<div class="post"><div class="postTitle"><h2><a href="https://other.example/abss/second/">Second Book - B. Writer</a></h2></div>
-<div class="postInfo">Category: Kids <br />Language: German<br /></div>
-<div class="postContent"><p>Posted: 1 Jan 2024<br />Format: <span>MP3</span> / Bitrate: <span>Mixed</span><br />File Size: <span>1.67</span> GBs</p></div></div>
-<div class="post"><div class="postTitle"><h2>no link here</h2></div></div>
-</div>`
-
-func TestParseSearch(t *testing.T) {
-	got, err := ParseSearch(searchHTML, "https://site.example")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("got %d candidates, want 2", len(got))
-	}
-	first := Candidate{Heading: "First Book - Ann Author", URL: "https://site.example/abss/first-book/",
-		Language: "English", Format: "M4B", Bitrate: "64 Kbps", Size: "419.23 MBs", Posted: "16 Dec 2025"}
-	if g := *got[0]; g.Heading != first.Heading || g.URL != first.URL || g.Language != first.Language ||
-		g.Format != first.Format || g.Bitrate != first.Bitrate || g.Size != first.Size || g.Posted != first.Posted {
-		t.Errorf("first = %+v\nwant   %+v", g, first)
-	}
-	if g := got[1]; g.URL != "https://other.example/abss/second/" || g.Language != "German" || g.Bitrate != "Mixed" || g.Size != "1.67 GBs" {
-		t.Errorf("second = %+v", *g)
-	}
-}
-
-const detailsHTML = `<div class="post"><div class="postTitle"><h1 itemprop="name">First Book: Full Heading - Ann Author</h1></div>
-<div class="desc"><p>Written by <a href="/?s=ann"><span class="author">Ann Author</span></a> <br />
-Read by <a href="/?s=r1"><span class="narrator">Reader One</span></a>, <a href="/?s=r2"><span class="narrator">Reader Two</span></a><br />
-Format: <span class="format">M4B</span> <br /><span class="is_abridged">Unabridged</span></p></div>
-<table>
-<tr><td>Tracker:</td><td>udp://one.example:1337/announce</td></tr>
-<tr><td>Tracker:</td><td>http://two.example:80/announce</td></tr>
-<tr><td>Tracker:</td><td>udp://one.example:1337/announce</td></tr>
-<tr><td colspan='2'>This is a Multifile Torrent</td></tr>
-<tr><td>Info Hash:</td><td>6D9A901038D432F3EC1DF3E7906CEDEECCEFD5E8</td></tr>
-</table>
-<ul><li><span class="commentAuthor">not an author</span></li></ul></div>`
-
-func TestParseDetails(t *testing.T) {
-	c := &Candidate{Heading: "First Book - Ann Author"}
-	if err := ParseDetails(detailsHTML, c); err != nil {
-		t.Fatal(err)
-	}
-	if c.Heading != "First Book: Full Heading - Ann Author" {
-		t.Errorf("heading = %q", c.Heading)
-	}
-	if strings.Join(c.Authors, "|") != "Ann Author" || strings.Join(c.Narrators, "|") != "Reader One|Reader Two" {
-		t.Errorf("authors = %v, narrators = %v", c.Authors, c.Narrators)
-	}
-	if c.Edition != "Unabridged" {
-		t.Errorf("edition = %q", c.Edition)
-	}
-	if c.InfoHash != "6d9a901038d432f3ec1df3e7906cedeeccefd5e8" {
-		t.Errorf("hash = %q", c.InfoHash)
-	}
-	if strings.Join(c.Trackers, "|") != "udp://one.example:1337/announce|http://two.example:80/announce" {
-		t.Errorf("trackers = %v", c.Trackers)
-	}
-}
-
 // fakeSource answers searches from a fixed table and applies canned details.
 type fakeSource struct {
+	name     string
 	listings map[string][]Candidate // query -> listings
 	details  map[string]Candidate   // url -> fields the details page adds
 	searches []string
 	fetched  []string
 	failWith error
+}
+
+func (f *fakeSource) Name() string {
+	if f.name == "" {
+		return "fake"
+	}
+	return f.name
 }
 
 func (f *fakeSource) Search(query string, page int) ([]*Candidate, error) {
@@ -241,7 +234,7 @@ func TestFindMagnetPicksUnabridgedAfterCheckingDetails(t *testing.T) {
 			"u/full":     {Authors: []string{"Frank Herbert"}, Edition: "Unabridged", InfoHash: "bbb", Trackers: []string{"udp://t.example:1/announce"}},
 		},
 	}
-	r := FindMagnet(Wanted{Title: "Dune", Author: "Frank Herbert"}, src, DefaultOptions())
+	r := Find(Wanted{Title: "Dune", Author: "Frank Herbert"}, []Source{src}, DefaultOptions())
 
 	if r.Status != StatusMatched || r.Candidate.URL != "u/full" {
 		t.Fatalf("status %s, picked %+v", r.Status, r.Candidate)
@@ -265,7 +258,7 @@ func TestFindMagnetFallsBackToTitleOnlySearch(t *testing.T) {
 		listings: map[string][]Candidate{"Dune": {{Heading: "Dune", URL: "u/1", Language: "English"}}},
 		details:  map[string]Candidate{"u/1": {Authors: []string{"Frank Herbert"}, InfoHash: "ccc"}},
 	}
-	r := FindMagnet(Wanted{Title: "Dune", Author: "Frank Herbert"}, src, DefaultOptions())
+	r := Find(Wanted{Title: "Dune", Author: "Frank Herbert"}, []Source{src}, DefaultOptions())
 	if r.Status != StatusMatched || strings.Join(src.searches, "|") != "Dune Herbert|Dune" {
 		t.Errorf("status %s (%.2f), searches %v", r.Status, r.Score, src.searches)
 	}
@@ -274,13 +267,13 @@ func TestFindMagnetFallsBackToTitleOnlySearch(t *testing.T) {
 func TestFindMagnetOutcomesWithoutAGoodMatch(t *testing.T) {
 	w := Wanted{Title: "Dune", Author: "Frank Herbert"}
 
-	empty := FindMagnet(w, &fakeSource{}, DefaultOptions())
+	empty := Find(w, []Source{&fakeSource{}}, DefaultOptions())
 	if empty.Status != StatusNotFound || empty.Magnet != "" {
 		t.Errorf("no results: %+v", empty)
 	}
 
 	unrelated := &fakeSource{listings: map[string][]Candidate{"Dune": {{Heading: "Gardening Basics - A. Person", URL: "u/x"}}}}
-	r := FindMagnet(w, unrelated, DefaultOptions())
+	r := Find(w, []Source{unrelated}, DefaultOptions())
 	if r.Status != StatusNotFound || r.Magnet != "" || len(unrelated.fetched) != 0 {
 		t.Errorf("unrelated result: status %s, magnet %q, fetched %v", r.Status, r.Magnet, unrelated.fetched)
 	}
@@ -289,18 +282,18 @@ func TestFindMagnetOutcomesWithoutAGoodMatch(t *testing.T) {
 		listings: map[string][]Candidate{"Dune Herbert": {{Heading: "Dune Messiah - Frank Herbert", URL: "u/s", Language: "English"}}},
 		details:  map[string]Candidate{"u/s": {Authors: []string{"Frank Herbert"}, InfoHash: "ddd"}},
 	}
-	r = FindMagnet(w, sequelOnly, DefaultOptions())
+	r = Find(w, []Source{sequelOnly}, DefaultOptions())
 	if r.Status != StatusLowConfidence || r.Magnet == "" {
 		t.Errorf("sequel only: status %s (%.2f), magnet %q", r.Status, r.Score, r.Magnet)
 	}
 
 	noHash := &fakeSource{listings: map[string][]Candidate{"Dune Herbert": {{Heading: "Dune - Frank Herbert", URL: "u/n"}}}}
-	if r = FindMagnet(w, noHash, DefaultOptions()); r.Status != StatusNotFound {
+	if r = Find(w, []Source{noHash}, DefaultOptions()); r.Status != StatusNotFound {
 		t.Errorf("no hash: status %s", r.Status)
 	}
 
-	broken := FindMagnet(w, &fakeSource{failWith: errors.New("HTTP 503")}, DefaultOptions())
-	if broken.Status != StatusError || broken.Note != "HTTP 503" {
+	broken := Find(w, []Source{&fakeSource{failWith: errors.New("HTTP 503")}}, DefaultOptions())
+	if broken.Status != StatusError || broken.Note != "fake: HTTP 503" {
 		t.Errorf("error: %+v", broken)
 	}
 }
@@ -322,7 +315,7 @@ func TestFindMagnetPicksBestAudioAmongEqualMatches(t *testing.T) {
 			"u/mp3-128": {InfoHash: "d"}, "u/abridged-256": {InfoHash: "e", Edition: "Abridged"},
 		},
 	}
-	r := FindMagnet(Wanted{Title: "Dune", Author: "Frank Herbert"}, src, DefaultOptions())
+	r := Find(Wanted{Title: "Dune", Author: "Frank Herbert"}, []Source{src}, DefaultOptions())
 	if r.Status != StatusMatched || r.Candidate.URL != "u/m4b-128" {
 		t.Fatalf("status %s, picked %s (fetched %v)", r.Status, r.Candidate.URL, src.fetched)
 	}
@@ -339,7 +332,7 @@ func TestFindMagnetIsStrictAboutLanguage(t *testing.T) {
 		{Heading: "Dune - Frank Herbert", URL: "u/es", Language: "Spanish"},
 	}}}
 	w := Wanted{Title: "Dune", Author: "Frank Herbert"}
-	r := FindMagnet(w, src, DefaultOptions())
+	r := Find(w, []Source{src}, DefaultOptions())
 	if r.Status != StatusNotFound || r.Magnet != "" || len(src.fetched) != 0 || !strings.Contains(r.Note, "other languages") {
 		t.Errorf("english only: %+v, fetched %v", r, src.fetched)
 	}
@@ -347,7 +340,7 @@ func TestFindMagnetIsStrictAboutLanguage(t *testing.T) {
 	any := DefaultOptions()
 	any.Language = ""
 	src.details = map[string]Candidate{"u/de": {InfoHash: "a"}, "u/es": {InfoHash: "b"}}
-	if r = FindMagnet(w, src, any); r.Status != StatusMatched {
+	if r = Find(w, []Source{src}, any); r.Status != StatusMatched {
 		t.Errorf("any language: status %s", r.Status)
 	}
 }
@@ -387,8 +380,55 @@ func TestAudioQualityNeverDecidesBetweenWeakMatches(t *testing.T) {
 		}},
 		details: map[string]Candidate{"u/wrong-flac": {InfoHash: "a", Authors: []string{"Frank Herbert"}}, "u/closer": {InfoHash: "b", Authors: []string{"Somebody Else"}}},
 	}
-	r := FindMagnet(Wanted{Title: "Dune Messiah", Author: "Frank Herbert"}, src, DefaultOptions())
+	r := Find(Wanted{Title: "Dune Messiah", Author: "Frank Herbert"}, []Source{src}, DefaultOptions())
 	if r.Status != StatusLowConfidence || r.Candidate.URL != "u/closer" {
 		t.Errorf("status %s, picked %s (%.2f)", r.Status, r.Candidate.URL, r.Score)
+	}
+}
+
+func TestFindUsesEverySourceAndSurvivesOneFailing(t *testing.T) {
+	w := Wanted{Title: "Dune", Author: "Frank Herbert"}
+	weak := &fakeSource{name: "weak", listings: map[string][]Candidate{"Dune Herbert": {
+		{Heading: "Dune Messiah - Frank Herbert", URL: "weak/1", Language: "English"}}},
+		details: map[string]Candidate{"weak/1": {InfoHash: "aaa"}}}
+	broken := &fakeSource{name: "broken", failWith: errors.New("HTTP 503")}
+	good := &fakeSource{name: "good", listings: map[string][]Candidate{"Dune Herbert": {
+		{Heading: "Dune - Frank Herbert", URL: "good/1", Language: "English"}}},
+		details: map[string]Candidate{"good/1": {Authors: []string{"Frank Herbert"}, InfoHash: "bbb"}}}
+
+	r := Find(w, []Source{weak, broken, good}, DefaultOptions())
+	if r.Status != StatusMatched || r.Candidate.URL != "good/1" || r.Candidate.Source != "good" {
+		t.Fatalf("status %s, picked %+v", r.Status, r.Candidate)
+	}
+	if strings.Join(good.fetched, ",") != "good/1" {
+		t.Errorf("details must come from the source that listed the candidate: %v", good.fetched)
+	}
+
+	// A near-certain match from the first source means the rest are not asked.
+	never := &fakeSource{name: "never"}
+	if r = Find(w, []Source{good, never}, DefaultOptions()); r.Status != StatusMatched || len(never.searches) != 0 {
+		t.Errorf("status %s; second source was searched %v", r.Status, never.searches)
+	}
+
+	// When every source fails, that is an error rather than "not found".
+	if r = Find(w, []Source{broken}, DefaultOptions()); r.Status != StatusError || !strings.Contains(r.Note, "broken: HTTP 503") {
+		t.Errorf("all sources failing: %+v", r)
+	}
+}
+
+func TestRegistries(t *testing.T) {
+	RegisterSource("test-source", func(SourceConfig) (Source, error) { return &fakeSource{name: "registered"}, nil })
+	src, err := NewSource("test-source", SourceConfig{})
+	if err != nil || src.Name() != "registered" {
+		t.Errorf("source %v, err %v", src, err)
+	}
+	if _, err := NewSource("nope", SourceConfig{}); err == nil || !strings.Contains(err.Error(), "test-source") {
+		t.Errorf("unknown source should list what exists, got %v", err)
+	}
+	if _, err := NewDownloader("nope", "key"); err == nil || !strings.Contains(err.Error(), "unknown downloader") {
+		t.Errorf("unknown downloader: %v", err)
+	}
+	if _, err := NewFetcher(SourceConfig{Proxy: "not a url"}); err == nil {
+		t.Error("a bad proxy address should be refused")
 	}
 }

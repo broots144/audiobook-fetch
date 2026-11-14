@@ -1,6 +1,4 @@
-// Package magnetbatch turns a list of "Title | Author" lines into magnet
-// links, choosing the best listing for each automatically.
-package magnetbatch
+package audiobookfetch
 
 import (
 	"math"
@@ -68,12 +66,14 @@ var (
 type Wanted struct {
 	Title  string `json:"title"`
 	Author string `json:"author"`
-	Raw    string `json:"raw"`
+	Raw    string `json:"raw"`             // the line as it was written
+	Guess  string `json:"guess,omitempty"` // set when the split into title and author was inferred
 }
 
 // Candidate is one listing. Search fills the first half; the details page
 // fills in the rest.
 type Candidate struct {
+	Source   string `json:"source"` // which Source listed it
 	Heading  string `json:"heading"`
 	URL      string `json:"url"`
 	Language string `json:"language"`
