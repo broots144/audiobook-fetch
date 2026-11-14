@@ -724,3 +724,101 @@ func TestARejectedDownloadIsSetAsideAndNotFetchedAgain(t *testing.T) {
 		t.Errorf("second run: added %v, checked %d, result %+v", f.added, checked, results[1])
 	}
 }
+
+func TestAnArchiveIsUnpackedBeforeTheCheckAndNotFetchedAgain(t *testing.T) {
+	f := newFakeService(t)
+	zipped := makeZip(t, filepath.Join(t.TempDir(), "book.zip"), map[string]string{
+		"Book/01.mp3": "one", "Book/01.m4a": "one again", "Book/cover.jpg": "cover"})
+	f.has(hashA, true, map[string]string{"Zipped/Book.zip": readFile(t, zipped), "Zipped/extra.mp3": "extra", "Zipped/notes.txt": "notes"})
+	opts := testOptions(t)
+	opts.Unpack = &Unpacker{}
+	opts.KeepOneFormat = true
+	var checked [][]string
+	opts.Check = func(paths []string) Verdict {
+		var names []string
+		v := Verdict{Status: VerdictOK}
+		for _, path := range paths {
+			names = append(names, filepath.Base(path))
+			if ext := filepath.Ext(path); ext == ".m4a" || filepath.Base(path) == "extra.mp3" {
+				v.Duplicates = append(v.Duplicates, path) // as if these repeated the book
+			}
+		}
+		sort.Strings(names)
+		checked = append(checked, names)
+		return v
+	}
+	magnets := []Magnet{magnetFor(hashA)}
+
+	results, err := Download(f, magnets, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := results[0]; r.Status != DownloadDone || r.Files != 3 || r.Fetched != 3 {
+		t.Fatalf("result: %+v", r)
+	}
+	// The check saw what was inside the zip, not the zip.
+	if got := strings.Join(checked[0], " "); got != "01.m4a 01.mp3 cover.jpg extra.mp3 notes.txt" {
+		t.Errorf("checked: %s", got)
+	}
+	library := under(t, opts.Dest)
+	var kept, aside []string
+	for _, path := range library {
+		switch {
+		case strings.HasPrefix(path, ".audiobook-fetch/duplicates/"):
+			aside = append(aside, strings.TrimPrefix(path, ".audiobook-fetch/duplicates/"))
+		case !strings.HasPrefix(path, ".audiobook-fetch/"):
+			kept = append(kept, path)
+		}
+	}
+	if got := strings.Join(kept, "|"); got != "Zipped/Book/01.mp3|Zipped/Book/cover.jpg|Zipped/notes.txt" {
+		t.Errorf("the zip is deleted and the duplicates are out of the library: %s", got)
+	}
+	if got := strings.Join(aside, "|"); got != "Zipped/Book/01.m4a|Zipped/extra.mp3" {
+		t.Errorf("duplicates are moved aside, not deleted: %s", got)
+	}
+
+	// The item is still in the account, so a second run looks at it again.
+	// It must not download the zip or the duplicate a second time.
+	downloads := len(f.ranges)
+	results, err = Download(f, magnets, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := results[0]; r.Status != DownloadDone || r.Files != 3 || r.Fetched != 0 || len(f.ranges) != downloads {
+		t.Errorf("second run: %+v, downloads %d -> %d", r, downloads, len(f.ranges))
+	}
+	if got := strings.Join(checked[1], " "); got != "01.mp3 cover.jpg notes.txt" {
+		t.Errorf("the second check sees what is left: %s", got)
+	}
+
+	// -redo fetches everything afresh.
+	opts.Redo = true
+	if results, _ = Download(f, magnets, opts); results[0].Fetched != 2 {
+		t.Errorf("redo should download the zip and the duplicate again: %+v", results[0])
+	}
+}
+
+func TestAnArchiveThatCannotBeUnpackedIsKeptAndSaidSo(t *testing.T) {
+	f := newFakeService(t)
+	f.has(hashA, true, map[string]string{"Book/book.rar": "rar bytes"})
+	opts := testOptions(t)
+	opts.Unpack = &Unpacker{} // no program for rar on this machine
+	opts.Check = (&Checker{}).Check
+	var logged []string
+	opts.Log = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	results, err := Download(f, []Magnet{magnetFor(hashA)}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := results[0]
+	if r.Status != DownloadDone || r.Check.Status != VerdictUnchecked || !strings.Contains(r.Note, "could not unpack book.rar") {
+		t.Errorf("a book still in its archive is kept, not rejected: %+v, check %+v", r, r.Check)
+	}
+	if got := readFile(t, opts.Dest, "Book", "book.rar"); got != "rar bytes" {
+		t.Errorf("the archive is left as it was, got %q", got)
+	}
+	if !strings.Contains(strings.Join(logged, "\n"), "could not unpack book.rar") {
+		t.Errorf("log: %q", logged)
+	}
+}

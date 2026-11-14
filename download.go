@@ -49,9 +49,15 @@ type DownloadOptions struct {
 	// Check, when set, examines each item's files once they are all here.
 	// An item it rejects is moved out of the folder (see RejectedDir) and
 	// reported as rejected instead of downloaded.
-	Check   func(paths []string) Verdict
-	Log     func(format string, args ...any)
-	OnBytes func(n int64) // called as data arrives, for progress display
+	Check func(paths []string) Verdict
+	// Unpack, when set, opens archives among an item's files before they
+	// are checked, and deletes the ones that unpacked whole.
+	Unpack *Unpacker
+	// KeepOneFormat moves aside the repeats when Check finds the same book
+	// in several formats (see DuplicatesDir), keeping the best.
+	KeepOneFormat bool
+	Log           func(format string, args ...any)
+	OnBytes       func(n int64) // called as data arrives, for progress display
 
 	sleep func(time.Duration)
 	now   func() time.Time
@@ -86,6 +92,10 @@ func BookkeepingDir(dest string) string { return filepath.Join(dest, "."+AppName
 // they are out of the library but nothing is destroyed on a machine's say-so.
 func RejectedDir(dest string) string { return filepath.Join(BookkeepingDir(dest), "rejected") }
 
+// DuplicatesDir is where the repeats go when an item holds the same book in
+// several formats: out of the library, but not destroyed.
+func DuplicatesDir(dest string) string { return filepath.Join(BookkeepingDir(dest), "duplicates") }
+
 // state is what the tool remembers between runs, per download folder.
 type state struct {
 	// Added is what this tool put on the service, so that removing afterwards
@@ -97,6 +107,12 @@ type state struct {
 	// Rejected is what was downloaded and then found wanting, and why, so
 	// that a later run does not fetch the same thing just to reject it again.
 	Rejected map[string]string `json:"rejected,omitempty"`
+	// Replaced is the downloaded files that are deliberately no longer where
+	// they were saved, and what stands in for each: an unpacked archive's
+	// contents, or nothing for a duplicate that was moved aside. Without
+	// it a later run would download them all over again. Paths are relative
+	// to the download folder.
+	Replaced map[string][]string `json:"replaced,omitempty"`
 	path     string
 }
 
@@ -114,6 +130,9 @@ func loadState(dest string, service Downloader) *state {
 	}
 	if s.Rejected == nil {
 		s.Rejected = map[string]string{}
+	}
+	if s.Replaced == nil {
+		s.Replaced = map[string][]string{}
 	}
 	return s
 }
@@ -416,6 +435,20 @@ func fetchItem(service Downloader, item Item, st *state, opts DownloadOptions) D
 			errs = append(errs, err.Error())
 			continue
 		}
+		if rel := relative(opts.Dest, path); opts.Redo {
+			delete(st.Replaced, rel)
+		} else if standIns, replaced := st.Replaced[rel]; replaced {
+			// Unpacked or moved aside by an earlier run: it is accounted for.
+			mu.Lock()
+			result.Files++
+			mu.Unlock()
+			for _, standIn := range standIns {
+				if at := filepath.Join(opts.Dest, filepath.FromSlash(standIn)); isFile(at) {
+					paths = append(paths, at)
+				}
+			}
+			continue
+		}
 		paths = append(paths, path)
 		wg.Add(1)
 		slots <- struct{}{}
@@ -446,18 +479,51 @@ func fetchItem(service Downloader, item Item, st *state, opts DownloadOptions) D
 	result.Status = DownloadDone
 	st.Done[hash] = true
 	delete(st.Rejected, hash) // a redo gets a fresh verdict
+	if opts.Unpack != nil {
+		files, unpacked, notes := opts.Unpack.Unpack(paths)
+		for archive, inside := range unpacked {
+			standIns := make([]string, 0, len(inside))
+			for _, path := range inside {
+				standIns = append(standIns, relative(opts.Dest, path))
+			}
+			st.Replaced[relative(opts.Dest, archive)] = standIns
+		}
+		for _, note := range notes {
+			opts.Log("        %s", note)
+			if strings.HasPrefix(note, "could not") {
+				result.Note = strings.TrimPrefix(result.Note+"; "+note, "; ")
+			}
+		}
+		paths = files
+	}
 	if opts.Check != nil {
 		verdict := opts.Check(paths)
 		result.Check = &verdict
-		if verdict.Status == VerdictRejected {
+		switch {
+		case verdict.Status == VerdictRejected:
 			why := strings.Join(verdict.Reasons, "; ")
 			result.Status = DownloadRejected
 			delete(st.Done, hash)
 			st.Rejected[hash] = why
-			if moved, err := setAside(opts.Dest, paths); err != nil {
+			if moved, err := setAside(opts.Dest, RejectedDir(opts.Dest), paths); err != nil {
 				result.Note = why + "; could not move its files out of the folder: " + err.Error()
 			} else {
 				result.Note = why + "; files moved to " + moved
+			}
+		case opts.KeepOneFormat && len(verdict.Duplicates) > 0:
+			if moved, err := setAside(opts.Dest, DuplicatesDir(opts.Dest), verdict.Duplicates); err != nil {
+				result.Note = strings.TrimPrefix(result.Note+"; could not move the duplicate formats aside: "+err.Error(), "; ")
+			} else {
+				opts.Log("        %d duplicate files moved to %s", len(verdict.Duplicates), moved)
+				for _, path := range verdict.Duplicates {
+					// One that came out of an archive is already covered
+					// by the archive's entry; this is for the others.
+					if rel := relative(opts.Dest, path); !isFile(path) {
+						if _, covered := st.Replaced[rel]; !covered {
+							st.Replaced[rel] = []string{}
+						}
+					}
+				}
 			}
 		}
 	}
@@ -492,10 +558,29 @@ func fetchItem(service Downloader, item Item, st *state, opts DownloadOptions) D
 	return result
 }
 
-// setAside moves an item's files from the download folder to RejectedDir,
-// keeping their layout, and tidies away the folders that leaves empty.
-func setAside(dest string, paths []string) (string, error) {
-	aside := RejectedDir(dest)
+// relative is path as the state file records it: relative to the download
+// folder, with forward slashes.
+func relative(dest, path string) string {
+	rel, err := filepath.Rel(dest, path)
+	if err != nil {
+		return filepath.ToSlash(path)
+	}
+	return filepath.ToSlash(rel)
+}
+
+func isFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+// SetAside moves files out of a library folder into aside (RejectedDir or
+// DuplicatesDir), keeping their layout, and tidies away the folders that
+// leaves empty. Nothing is deleted.
+func SetAside(dest, aside string, paths []string) (string, error) {
+	return setAside(dest, aside, paths)
+}
+
+func setAside(dest, aside string, paths []string) (string, error) {
 	for _, path := range paths {
 		rel, err := filepath.Rel(dest, path)
 		if err != nil {

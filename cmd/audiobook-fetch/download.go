@@ -19,6 +19,8 @@ type downloadFlags struct {
 	name    string
 	keyFile string
 	check   bool   // examine the audio once it is downloaded
+	unpack  bool   // open archives before checking
+	oneOnly bool   // keep one format when a book arrives in several
 	model   string // whisper.cpp model file for the listening checks
 	lang    string // language the audio should be in; set by the command
 }
@@ -36,6 +38,8 @@ func (d *downloadFlags) register(flags *flag.FlagSet, cfg config) {
 	flags.DurationVar(&d.opts.StallAfter, "stall-after", d.opts.StallAfter, "give up on a link the service makes no progress on for this long, freeing its slot (0 = keep waiting)")
 	flags.DurationVar(&d.opts.Poll, "poll", d.opts.Poll, "how often to check on links the service is still fetching")
 	flags.BoolVar(&d.check, "check", cfg.Check == nil || *cfg.Check, "check each download's audio: playable, bitrate, spoken language, abridged or dramatized (needs ffprobe; listening needs ffmpeg, whisper-cli and a model)")
+	flags.BoolVar(&d.unpack, "unpack", cfg.Unpack == nil || *cfg.Unpack, "unpack zip, rar and 7z archives once downloaded, then delete them (rar and 7z need 7zz, 7z, unar or bsdtar)")
+	flags.BoolVar(&d.oneOnly, "keep-one-format", cfg.KeepOneFormat == nil || *cfg.KeepOneFormat, "when a download holds the same book in several formats, keep the best and move the rest aside (needs -check)")
 	flags.StringVar(&d.model, "whisper-model", defaultModel(cfg), "whisper.cpp model file used to listen to samples")
 	flags.StringVar(&d.keyFile, "key-file", "", "file holding the service's API key (default: <name>.key in the config folder, or the <NAME>_API_KEY variable)")
 }
@@ -101,6 +105,13 @@ func downloadLinks(magnets []fetch.Magnet, d *downloadFlags, quiet bool) ([]fetc
 		return nil, err
 	}
 	opts := d.opts
+	if d.unpack {
+		opts.Unpack = fetch.NewUnpacker()
+		for _, gap := range opts.Unpack.Missing() {
+			fmt.Fprintf(os.Stderr, "unpack: %s\n", gap)
+		}
+	}
+	opts.KeepOneFormat = d.oneOnly
 	if d.check {
 		checker := newChecker(d.lang, d.model)
 		for _, gap := range checker.Missing() {
@@ -125,11 +136,14 @@ func downloadLinks(magnets []fetch.Magnet, d *downloadFlags, quiet bool) ([]fetc
 	}
 
 	counts := map[string]int{}
-	var files, fetched, removed, flagged int
+	var files, fetched, removed, flagged, repeats int
 	var bytes int64
 	for _, r := range results {
 		if r.Check != nil && r.Check.Status == fetch.VerdictFlagged {
 			flagged++
+		}
+		if r.Check != nil && r.Status == fetch.DownloadDone && opts.KeepOneFormat {
+			repeats += len(r.Check.Duplicates)
 		}
 		counts[r.Status]++
 		files += r.Files
@@ -150,6 +164,9 @@ func downloadLinks(magnets []fetch.Magnet, d *downloadFlags, quiet bool) ([]fetc
 	if counts[fetch.DownloadRejected] > 0 {
 		fmt.Fprintf(os.Stderr, "%d download(s) were rejected by the check and moved to %s\n",
 			counts[fetch.DownloadRejected], fetch.RejectedDir(opts.Dest))
+	}
+	if repeats > 0 {
+		fmt.Fprintf(os.Stderr, "%d file(s) repeating a book in another format were moved to %s\n", repeats, fetch.DuplicatesDir(opts.Dest))
 	}
 	if flagged > 0 {
 		fmt.Fprintf(os.Stderr, "%d download(s) were kept but flagged by the check; see the \"check:\" lines above\n", flagged)
@@ -255,14 +272,7 @@ func cmdCheck(args []string, cfg config) {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
-		var paths []string
-		_ = filepath.WalkDir(filepath.Join(folder, entry.Name()), func(path string, d os.DirEntry, err error) error {
-			if err == nil && d.Type().IsRegular() && !strings.HasPrefix(d.Name(), ".") {
-				paths = append(paths, path)
-			}
-			return nil
-		})
-		verdict := checker.Check(paths)
+		verdict := checker.Check(bookFiles(filepath.Join(folder, entry.Name())))
 		verdicts[entry.Name()] = verdict
 		counts[verdict.Status]++
 		fmt.Fprintf(os.Stderr, "%s\n        %s\n", entry.Name(), verdict.Summary())
@@ -276,6 +286,112 @@ func cmdCheck(args []string, cfg config) {
 		_ = enc.Encode(verdicts)
 	}
 	if counts[fetch.VerdictRejected] > 0 {
+		os.Exit(1)
+	}
+}
+
+// bookFiles lists the files of one book folder, hidden ones left out.
+func bookFiles(folder string) []string {
+	var paths []string
+	_ = filepath.WalkDir(folder, func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() && !strings.HasPrefix(d.Name(), ".") {
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	return paths
+}
+
+// cmdTidy puts right, in books that are already in a folder, the two things
+// a download would have had put right on arrival: archives are unpacked, and
+// a book held in several formats is cut down to the best one.
+func cmdTidy(args []string, cfg config) {
+	flags := flag.NewFlagSet("tidy", flag.ExitOnError)
+	dryRun := flags.Bool("dry-run", false, "only say what would be done")
+	only := flags.String("book", "", "only tidy books whose folder name contains this")
+	unpack := flags.Bool("unpack", true, "unpack zip, rar and 7z archives, then delete them")
+	oneOnly := flags.Bool("keep-one-format", true, "keep the best format of a book held in several, and move the rest aside")
+	flags.Usage = func() {
+		fmt.Fprintf(os.Stderr, "usage: %s tidy [options] [FOLDER]\n\nTidies every book in FOLDER (each subfolder is one book): archives are unpacked\nand deleted, and when a book is there in several formats the best is kept and\nthe others are moved to FOLDER/.%s/duplicates. Only archives are ever deleted.\n\noptions:\n", fetch.AppName, fetch.AppName)
+		flags.PrintDefaults()
+	}
+	positional := parseArgs(flags, args)
+	if len(positional) > 1 {
+		flags.Usage()
+		os.Exit(2)
+	}
+	folder, err := destination(positional, 0, cfg.To)
+	if err != nil {
+		fatal(err)
+	}
+	unpacker := fetch.NewUnpacker()
+	checker := fetch.NewChecker("", "")
+	if *unpack {
+		for _, gap := range unpacker.Missing() {
+			fmt.Fprintf(os.Stderr, "tidy: %s\n", gap)
+		}
+	}
+	if *oneOnly && checker.FFprobe == "" {
+		fmt.Fprintf(os.Stderr, "tidy: ffprobe is not installed (part of ffmpeg), so formats cannot be compared\n")
+		*oneOnly = false
+	}
+	entries, err := os.ReadDir(folder)
+	if err != nil {
+		fatal(err)
+	}
+	would := ""
+	if *dryRun {
+		would = "would be "
+	}
+	books, unpacked, moved, failed := 0, 0, 0, 0
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") ||
+			!strings.Contains(strings.ToLower(entry.Name()), strings.ToLower(*only)) {
+			continue
+		}
+		books++
+		paths := bookFiles(filepath.Join(folder, entry.Name()))
+		var lines []string
+		if *unpack && *dryRun {
+			for _, path := range paths {
+				if fetch.IsArchive(path) {
+					unpacked++
+					lines = append(lines, "would be unpacked: "+filepath.Base(path))
+				}
+			}
+		} else if *unpack {
+			files, done, notes := unpacker.Unpack(paths)
+			paths = files
+			unpacked += len(done)
+			for _, note := range notes {
+				if strings.HasPrefix(note, "could not") {
+					failed++
+				}
+				lines = append(lines, note)
+			}
+		}
+		if *oneOnly {
+			if duplicates, note := checker.DuplicateFormats(paths); len(duplicates) > 0 {
+				lines = append(lines, note)
+				if !*dryRun {
+					if _, err := fetch.SetAside(folder, fetch.DuplicatesDir(folder), duplicates); err != nil {
+						failed++
+						lines = append(lines, "could not move the duplicates aside: "+err.Error())
+						duplicates = nil
+					}
+				}
+				moved += len(duplicates)
+				if len(duplicates) > 0 {
+					lines = append(lines, fmt.Sprintf("%d duplicate files %smoved to %s", len(duplicates), would, fetch.DuplicatesDir(folder)))
+				}
+			}
+		}
+		if len(lines) > 0 {
+			fmt.Fprintf(os.Stderr, "%s\n        %s\n", entry.Name(), strings.Join(lines, "\n        "))
+		}
+	}
+	fmt.Fprintf(os.Stderr, "\n%d books: %d archive(s) %sunpacked, %d duplicate file(s) %smoved aside\n", books, unpacked, would, moved, would)
+	if failed > 0 {
 		os.Exit(1)
 	}
 }

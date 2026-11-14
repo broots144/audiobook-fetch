@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
@@ -165,8 +166,13 @@ func sandbox(t *testing.T) (home string) {
 	t.Setenv("FAKEBOX_API_KEY", "")
 
 	tools := t.TempDir()
+	// Every MP3 is an hour long; an M4B is two hours.
 	script := `#!/bin/sh
-echo '{"streams":[{"codec_name":"mp3","codec_type":"audio"}],"format":{"duration":"3600.0","bit_rate":"64000"}}'
+for arg; do last=$arg; done
+case "$last" in
+*.m4b) echo '{"streams":[{"codec_name":"aac","codec_type":"audio"}],"format":{"duration":"7200.0","bit_rate":"64000"}}' ;;
+*) echo '{"streams":[{"codec_name":"mp3","codec_type":"audio"}],"format":{"duration":"3600.0","bit_rate":"64000"}}' ;;
+esac
 `
 	if err := os.WriteFile(filepath.Join(tools, "ffprobe"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -773,5 +779,126 @@ func TestCheckCommand(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(library, "Radio Drama Book", "01.mp3")); err != nil {
 		t.Errorf("check must move nothing: %v", err)
+	}
+}
+
+// zipOf returns the bytes of a zip holding the given files.
+func zipOf(t *testing.T, files map[string]string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	for name, content := range files {
+		entry, err := w.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = entry.Write([]byte(content))
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
+}
+
+func exists(parts ...string) bool {
+	_, err := os.Stat(filepath.Join(parts...))
+	return err == nil
+}
+
+func TestTidyCommand(t *testing.T) {
+	home := sandbox(t)
+	library := filepath.Join(home, "library")
+	// One book still in its zip; one held twice, as an M4B and as two MP3s
+	// of the same total length; one that is fine.
+	write(t, filepath.Join(library, "Zipped Book", "Zipped Book.zip"), zipOf(t, map[string]string{"Zipped Book/01.mp3": "one"}))
+	write(t, filepath.Join(library, "Twice", "Twice.m4b"), "x")
+	write(t, filepath.Join(library, "Twice", "MP3", "01.mp3"), "x")
+	write(t, filepath.Join(library, "Twice", "MP3", "02.mp3"), "x")
+	write(t, filepath.Join(library, "Twice", "cover.jpg"), "x")
+	write(t, filepath.Join(library, "Fine", "01.mp3"), "x")
+	cfg := testConfig()
+	cfg.To = library
+
+	// A dry run says what it would do and touches nothing.
+	_, stderr := capture(t, func() { cmdTidy([]string{"-dry-run"}, cfg) })
+	for _, want := range []string{"would be unpacked: Zipped Book.zip", "keeping m4b (1 file, 64 kbps); duplicates: mp3 (2 files, 64 kbps)",
+		"2 duplicate files would be moved to", "3 books: 1 archive(s) would be unpacked, 2 duplicate file(s) would be moved aside"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("dry run: missing %q in:\n%s", want, stderr)
+		}
+	}
+	if !exists(library, "Zipped Book", "Zipped Book.zip") || !exists(library, "Twice", "MP3", "01.mp3") || exists(library, ".audiobook-fetch") {
+		t.Fatal("a dry run must change nothing")
+	}
+
+	// -book limits it to the folders named.
+	_, stderr = capture(t, func() { cmdTidy([]string{"-book", "zipped"}, cfg) })
+	if !strings.Contains(stderr, "unpacked Zipped Book.zip: 1 files") || !strings.Contains(stderr, "1 books: 1 archive(s) unpacked, 0 duplicate file(s) moved aside") {
+		t.Errorf("-book:\n%s", stderr)
+	}
+	if exists(library, "Zipped Book", "Zipped Book.zip") || read(t, library, "Zipped Book", "Zipped Book", "01.mp3") != "one" {
+		t.Error("the zip should be unpacked and deleted")
+	}
+	if !exists(library, "Twice", "MP3", "01.mp3") {
+		t.Error("-book must leave the other books alone")
+	}
+
+	// The rest: the worse format is moved aside, not deleted.
+	_, stderr = capture(t, func() { cmdTidy([]string{library}, cfg) })
+	if !strings.Contains(stderr, "3 books: 0 archive(s) unpacked, 2 duplicate file(s) moved aside") {
+		t.Errorf("tidy:\n%s", stderr)
+	}
+	if !exists(library, "Twice", "Twice.m4b") || !exists(library, "Twice", "cover.jpg") || exists(library, "Twice", "MP3") {
+		t.Error("the M4B and the cover stay; the MP3 folder goes")
+	}
+	if !exists(fetch.DuplicatesDir(library), "Twice", "MP3", "02.mp3") || !exists(library, "Fine", "01.mp3") {
+		t.Error("duplicates are kept aside, and a book with one format is untouched")
+	}
+
+	// Run again, there is nothing left to do.
+	_, stderr = capture(t, func() { cmdTidy(nil, cfg) })
+	if !strings.Contains(stderr, "3 books: 0 archive(s) unpacked, 0 duplicate file(s) moved aside") {
+		t.Errorf("second run:\n%s", stderr)
+	}
+
+	// With both halves switched off it only counts.
+	_, stderr = capture(t, func() { cmdTidy([]string{"-unpack=false", "-keep-one-format=false"}, cfg) })
+	if !strings.Contains(stderr, "3 books: 0 archive(s) unpacked") {
+		t.Errorf("switched off:\n%s", stderr)
+	}
+}
+
+func TestDownloadUnpacksAndKeepsOneFormat(t *testing.T) {
+	home := sandbox(t)
+	dest := filepath.Join(home, "library")
+	box.catalog[hashA] = map[string]string{
+		"Frankenstein/Frankenstein.zip": zipOf(t, map[string]string{"Frankenstein.m4b": "whole book"}),
+		"Frankenstein/01.mp3":           "frank-1",
+		"Frankenstein/02.mp3":           "frank-2",
+	}
+	links := write(t, filepath.Join(home, "magnets.txt"), magnet(hashA)+"\n")
+	t.Setenv("FAKEBOX_API_KEY", "k")
+
+	_, stderr := capture(t, func() { cmdDownload([]string{links, dest, "-poll", "1ms"}, testConfig()) })
+	for _, want := range []string{"unpacked Frankenstein.zip: 1 files", "keeping m4b (1 file, 64 kbps); duplicates: mp3 (2 files, 64 kbps)",
+		"2 file(s) repeating a book in another format were moved to"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("missing %q in:\n%s", want, stderr)
+		}
+	}
+	if !exists(dest, "Frankenstein", "Frankenstein.m4b") || exists(dest, "Frankenstein", "Frankenstein.zip") || exists(dest, "Frankenstein", "01.mp3") {
+		t.Error("the library should hold the M4B alone")
+	}
+	if !exists(fetch.DuplicatesDir(dest), "Frankenstein", "01.mp3") {
+		t.Error("the MP3s should be set aside")
+	}
+
+	// Both can be switched off, in which case the files stay as they came.
+	other := filepath.Join(home, "untouched")
+	capture(t, func() {
+		cmdDownload([]string{links, other, "-poll", "1ms", "-unpack=false", "-keep-one-format=false"}, testConfig())
+	})
+	if !exists(other, "Frankenstein", "Frankenstein.zip") || !exists(other, "Frankenstein", "01.mp3") {
+		t.Error("with both off nothing is unpacked or moved")
 	}
 }

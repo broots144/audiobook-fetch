@@ -28,7 +28,17 @@ download and the downloaded files themselves all come from strangers:
   `ffprobe`, `ffmpeg` and `whisper-cli` as arguments (no shell), restricted
   to reading local files, with a time limit. Those programs do parse
   untrusted media, so keep them up to date.
-- A download the check rejects is moved aside, not deleted.
+- Archives (zip, rar, 7z) are unpacked into the folder they are in and
+  nowhere else. Names inside are cleaned like any other file name, links and
+  other special entries are skipped, and existing files are never
+  overwritten. Zip is read by the tool itself, with a limit on how far an
+  archive may expand. Rar and 7z are unpacked by an outside program
+  (`7zz`, `7z`, `unar` or `bsdtar`) into a scratch folder first, and only
+  plain files are moved out of it; that program does parse untrusted data
+  and has no expansion limit of ours, so keep it up to date.
+- The only thing the tool ever deletes is an archive it has fully unpacked.
+  A download the check rejects, and the extra copies of a book that came in
+  several formats, are moved aside, not deleted.
 - Answers from sources are size-limited, and text from them is written to
   the CSV report in a form spreadsheets will not run as a formula.
 

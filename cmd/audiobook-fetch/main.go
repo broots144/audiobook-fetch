@@ -42,7 +42,7 @@ func main() {
 	command := "get"
 	if len(args) > 0 {
 		switch args[0] {
-		case "get", "find", "download", "check":
+		case "get", "find", "download", "check", "tidy":
 			command, args = args[0], args[1:]
 		case "help", "-h", "-help", "--help":
 			usage(os.Stdout)
@@ -57,6 +57,8 @@ func main() {
 		cmdDownload(args, cfg)
 	case "check":
 		cmdCheck(args, cfg)
+	case "tidy":
+		cmdTidy(args, cfg)
 	default:
 		cmdGet(args, cfg)
 	}
@@ -69,6 +71,7 @@ func usage(w io.Writer) {
   %[1]s find LIST                only find the links (writes a report)
   %[1]s download LINKS [FOLDER]  only download magnet links you already have
   %[1]s check [FOLDER]           check the audio of books already downloaded
+  %[1]s tidy [FOLDER]            unpack archives and drop duplicate formats there
 
 LIST is a text file with one book per line, for example:
 
@@ -106,6 +109,10 @@ type config struct {
 	// Check is the default for -check; left out, downloads are checked.
 	Check        *bool  `json:"check"`
 	WhisperModel string `json:"whisper_model"` // default for -whisper-model
+	// Unpack and KeepOneFormat are the defaults for -unpack and
+	// -keep-one-format; left out, both are on.
+	Unpack        *bool `json:"unpack"`
+	KeepOneFormat *bool `json:"keep_one_format"`
 }
 
 func configDir() string {

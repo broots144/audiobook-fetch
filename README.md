@@ -4,8 +4,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Give it a list of audiobooks and a folder. It finds each one, picks the best
-edition on its own, downloads the files into the folder, and checks that what
-arrived really is that book.
+edition on its own, downloads the files into the folder, unpacks them if they
+came as an archive, and checks that what arrived really is that book.
 
 ```sh
 audiobook-fetch books.txt /path/to/folder
@@ -63,15 +63,17 @@ sources and one downloader ship with it, you choose between them with
 Homebrew and most package managers) and put a whisper.cpp model such as
 `ggml-base.bin` in `~/.config/audiobook-fetch/models/`. Each download's
 audio is then [checked](#checking-what-came-down): playable, spoken language,
-abridged or dramatized.
+abridged or dramatized. Zip archives are unpacked without anything extra; for
+rar and 7z, install one of `7zz`, `7z`, `unar` or `bsdtar` (macOS has
+`bsdtar` already).
 
 ## Contents
 
 - [The list](#the-list): what a line can look like
 - [What happens](#what-happens) and [how it picks](#how-it-picks)
 - [Options](#options) and the [config file](#config-file)
-- [Behaviour in detail](#behaviour-in-detail): queues, dead links, the audio check, sources
-- [The two halves on their own](#the-two-halves-on-their-own): `find`, `download`, `check`
+- [Behaviour in detail](#behaviour-in-detail): queues, dead links, archives, the audio check, duplicate formats, sources
+- [The parts on their own](#the-parts-on-their-own): `find`, `download`, `check`, `tidy`
 - [Extending](#extending): the source and downloader plugins, and [use from Go](#use-from-go)
 - [Contributing](CONTRIBUTING.md), [security](SECURITY.md), [license](#license)
 
@@ -154,6 +156,8 @@ A pick scoring 0.75 or more counts as a match (`-min-score`).
 | `-redo` | off | download links again even if an earlier run completed or rejected them |
 | `-check` | on | check each download's audio once it is here (`-check=false` turns it off) |
 | `-whisper-model FILE` | see below | whisper.cpp model used to listen to samples |
+| `-unpack` | on | unpack zip, rar and 7z archives once downloaded, then delete them |
+| `-keep-one-format` | on | when a download holds the same book in several formats, keep the best and move the rest aside |
 | `-quiet` | off | only print the summaries |
 
 ### Config file
@@ -169,7 +173,9 @@ To avoid typing the folder and options every time, create
   "downloader": "torbox",
   "search_proxy": "",
   "check": true,
-  "whisper_model": "/path/to/ggml-base.bin"
+  "whisper_model": "/path/to/ggml-base.bin",
+  "unpack": true,
+  "keep_one_format": true
 }
 ```
 
@@ -203,6 +209,24 @@ fallbacks are noted during the search, so trying them needs no further searching
 out of listings that way, the sources its dead listing did not come from are
 searched once more before the tool gives up on it.
 
+### Archives
+
+Some downloads wrap the whole book in a `.zip`, `.rar` or `.7z`. Once such an
+item is here, each archive is unpacked into the folder it is in and then
+**deleted**, so the check (and your player) sees the audio and not a box.
+
+- Zip is handled by the tool itself. Rar and 7z are handed to the first of
+  `7zz`, `7z`, `unar` or `bsdtar` that is installed; multi-part rars are
+  unpacked from their first piece and all the pieces deleted.
+- An archive is deleted only when everything in it came out. One that cannot
+  be unpacked (no program for it, a password, damage, or it would overwrite a
+  different file already there) is left exactly as it was and the tool says
+  why. A book still in its archive is reported as *unchecked*, never rejected.
+- Nothing in an archive can be written outside the folder the archive is in,
+  and one that unpacks to far more than its own size is refused.
+
+`-unpack=false` leaves archives alone.
+
 ### Checking what came down
 
 A listing's description is only a claim, so once
@@ -224,6 +248,27 @@ again on later runs unless `-redo` is given. When the link came from a search,
 the book's next-best listing is tried, as for a link with no seeds. Lesser
 doubts (low bitrate, some unplayable files, an edition word, one odd language
 sample) only **flag** the download; it is kept and the `check:` line says why.
+
+### The same book in several formats
+
+Some downloads hold the whole book two or three times: once as an M4B, again
+as a folder of MP3s. The check notices when all the files of one format run,
+in total, as long as all the files of another (to within 2%), keeps the best
+one, and moves the others to `.audiobook-fetch/duplicates/` inside the
+download folder. They are **moved, not deleted**: look there if you would
+have chosen differently, and empty the folder when you are happy.
+
+The best-sounding format is kept, going by bitrate weighted for how efficient
+the codec is (AAC and Opus need less than MP3 for the same sound). Among
+formats that sound as good as each other, a single M4B wins because it
+carries chapters, then the one in fewer files, then the smaller one. Formats
+of different lengths are never touched: a sample, a bonus track, or two
+halves of a book in different formats all stay.
+
+`-keep-one-format=false` keeps everything. It needs the check, since the
+check is what measures the files.
+
+### Without the audio tools
 
 Both tools are optional. Without `ffprobe` nothing is checked; without
 `ffmpeg`, `whisper-cli` or a model file the listening checks are skipped, and
@@ -252,18 +297,26 @@ The tool stops after three failures in a row instead of grinding on; wait a
 while and run again, or raise `-delay`. `-search-proxy` sends searches (never
 downloads) through a proxy if your network needs one.
 
-## The two halves on their own
+## The parts on their own
 
 ```sh
 audiobook-fetch find books.txt                  # only find links; writes results/
 audiobook-fetch download magnets.txt /folder    # only download links you already have
 audiobook-fetch check /folder                   # only check books already downloaded
+audiobook-fetch tidy /folder                    # unpack archives and drop duplicate formats there
 ```
 
 `find` writes `magnets.txt` (one link per confident match), `results.csv` and
 `results.json`. `download` takes any file of magnet links. `check` treats each
 subfolder as one book and prints a verdict for each (`-json` for machines); it
 moves and deletes nothing, and exits non-zero if it would reject any.
+
+`tidy` does for books already in a folder what a download gets on arrival:
+[archives](#archives) are unpacked and deleted, and a book held in
+[several formats](#the-same-book-in-several-formats) is cut down to the best,
+with the others moved to the folder's `.audiobook-fetch/duplicates/`. Try it
+with `-dry-run` first to see what it would do, and use `-book NAME` to tidy
+only the folders whose name contains NAME.
 
 ## Extending
 
