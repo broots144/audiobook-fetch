@@ -58,16 +58,10 @@ listening to the files found.
 
 ## Quick start
 
-1. **Install it.**
-
-   ```sh
-   brew install broots144/tap/audiobook-fetch
-   ```
-
-   Or download a binary for macOS, Linux or Windows from the
-   [releases page](https://github.com/broots144/audiobook-fetch/releases)
-   (each release has checksums and build provenance), or build it with
-   Go 1.27 or newer:
+1. **Install it.** Download the binary for macOS, Linux or Windows from the
+   [releases page](https://github.com/broots144/audiobook-fetch/releases),
+   unpack it and put `audiobook-fetch` somewhere on your `PATH`. Each release
+   has checksums and build provenance. Or build it with Go 1.27 or newer:
 
    ```sh
    go install github.com/broots144/audiobook-fetch/cmd/audiobook-fetch@latest

@@ -128,8 +128,13 @@ git tag v1.2.3 && git push origin v1.2.3
 ```
 
 The release workflow tests, builds the binaries for macOS, Linux and
-Windows, publishes them with checksums and build provenance, and updates
-the Homebrew formula in `broots144/homebrew-tap`.
+Windows, and publishes them with checksums and build provenance.
+
+It also regenerates the Homebrew formula in `broots144/homebrew-tap`, once
+that is set up: the step runs only when this repository has a
+`HOMEBREW_TAP_DEPLOY_KEY` secret holding a deploy key with write access to
+the tap. To publish the formula for a release that already exists, run the
+workflow by hand (Actions, Release, Run workflow) and give it the tag.
 
 ## License
 

@@ -2,9 +2,17 @@ name: Release
 
 # Pushing a tag like v1.2.3 builds the binaries, publishes a GitHub release
 # with checksums and build provenance, and updates the Homebrew formula.
+#
+# Run by hand with a tag that is already released, it leaves the release
+# alone and only updates the formula, from the release's own checksums.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing release tag to publish the Homebrew formula for
+        required: true
 
 permissions:
   contents: read
@@ -18,21 +26,36 @@ jobs:
       id-token: write # sign the provenance
       attestations: write
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ inputs.tag || github.ref_name }}
       TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
 
+      - name: Is it released already?
+        id: released
+        run: |
+          case "$TAG" in v[0-9]*) ;; *) echo "not a release tag: $TAG"; exit 1 ;; esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "yes=true" >> "$GITHUB_OUTPUT"
+            mkdir -p dist
+            gh release download "$TAG" --pattern checksums.txt --dir dist
+          fi
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: steps.released.outputs.yes != 'true'
         with:
           go-version-file: go.mod
 
       - name: Test
+        if: steps.released.outputs.yes != 'true'
         run: go test -race -count=1 ./...
 
       - name: Build
+        if: steps.released.outputs.yes != 'true'
         run: |
           mkdir -p dist
           for target in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/amd64 windows/arm64; do
@@ -55,12 +78,12 @@ jobs:
           cat dist/checksums.txt
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: steps.released.outputs.yes != 'true'
         with:
           subject-path: dist/*
 
       - name: Publish the release
-        env:
-          GH_TOKEN: ${{ github.token }}
+        if: steps.released.outputs.yes != 'true'
         run: gh release create "$TAG" dist/* --title "$TAG" --generate-notes --verify-tag
 
       # The tap's formula is generated here and pushed with a deploy key
