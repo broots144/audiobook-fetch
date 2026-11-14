@@ -1,60 +1,79 @@
 # audiobook-fetch
 
 [![CI](https://github.com/broots144/audiobook-fetch/actions/workflows/ci.yml/badge.svg)](https://github.com/broots144/audiobook-fetch/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Give it a list of audiobooks and a folder. It finds each one, picks the best
-edition on its own, and downloads the files into the folder.
+edition on its own, downloads the files into the folder, and checks that what
+arrived really is that book.
 
 ```sh
 audiobook-fetch books.txt /path/to/folder
 ```
 
-Searching and downloading are both pluggable. Today it searches
-[AudioBook Bay](https://audiobookbay.lu) first, falls back to
-[Knaben](https://knaben.org) (a search engine over The Pirate Bay and other
-public trackers) for books it cannot match confidently there, and downloads
-through
-[TorBox](https://torbox.app), so a TorBox account is needed for the download
-half. More of either can be added (see [Extending](#extending)).
+> [!IMPORTANT]
+> **Only use this for audiobooks you are legally allowed to acquire**: works
+> in the public domain, works whose rights holder permits free distribution,
+> or anything else you have the right to download where you live.
+>
+> The tool automates searching and downloading. It cannot tell what you are
+> entitled to, and it does not try to. That is your responsibility, as is
+> following the law where you live and the terms of every service it talks
+> to. The authors do not condone copyright infringement and accept no
+> liability for how the tool is used (see [LICENSE](LICENSE)). It is not
+> affiliated with any site or service it can search or download through.
 
-> **Use this only for material you have the legal right to download.**
-> This tool automates searching and downloading; it does not check what you
-> are entitled to. That is your responsibility, as is following the terms of
-> the services it talks to and the law where you live. It is not affiliated
-> with AudioBook Bay, TorBox or any other service.
+**Built from plugins.** Where it searches (a *source*) and what fetches the
+links (a *downloader*) are both small plugins behind a Go interface. Three
+sources and one downloader ship with it, you choose between them with
+`-source` and `-downloader`, and adding your own is one package: see
+[Extending](#extending).
 
-## Set up
+## Quick start
 
-Needs Go 1.27 or newer. From a checkout:
+1. **Build it** (Go 1.27 or newer):
 
-```sh
-go build -o bin/audiobook-fetch ./cmd/audiobook-fetch
-```
+   ```sh
+   go install github.com/broots144/audiobook-fetch/cmd/audiobook-fetch@latest
+   ```
 
-or, without one, `go install github.com/broots144/audiobook-fetch/cmd/audiobook-fetch@latest`.
-For the optional [audio check](#options), also install `ffmpeg` and
-`whisper-cpp` (both are in Homebrew and most package managers) and download a
-whisper.cpp model such as `ggml-base.bin`.
+2. **Give it a downloader key.** Downloads go through
+   [TorBox](https://torbox.app), so you need an account there. Put its API
+   key in `~/.config/audiobook-fetch/torbox.key` and `chmod 600` it, or set
+   `TORBOX_API_KEY`.
 
-Put your TorBox API key in `~/.config/audiobook-fetch/torbox.key` (and
-`chmod 600` it; the tool warns if other users can read it), or set
-`TORBOX_API_KEY`. To avoid typing the folder every time, create
-`~/.config/audiobook-fetch/config.json`:
+3. **Write a list**, one book per line (see [`books.example.txt`](books.example.txt)):
 
-```json
-{
-  "to": "/path/to/audiobooks",
-  "remove_after": true,
-  "sources": ["audiobookbay", "knaben"],
-  "downloader": "torbox",
-  "search_proxy": "",
-  "check": true,
-  "whisper_model": "/path/to/ggml-base.bin"
-}
-```
+   ```
+   Pride and Prejudice | Jane Austen
+   Frankenstein | Mary Shelley
+   ```
 
-Every key is optional. With `to` set, `audiobook-fetch books.txt` is the
-whole command.
+4. **Run it:**
+
+   ```sh
+   audiobook-fetch books.txt /path/to/folder
+   ```
+
+   Books with a confident match are downloaded. The rest are listed in
+   `/path/to/folder/.audiobook-fetch/results.csv` for you to look at. Running
+   the same command again is always safe: it picks up where it stopped.
+
+**Optional, recommended:** install `ffmpeg` and `whisper-cpp` (both are in
+Homebrew and most package managers) and put a whisper.cpp model such as
+`ggml-base.bin` in `~/.config/audiobook-fetch/models/`. Each download's
+audio is then [checked](#checking-what-came-down): playable, spoken language,
+abridged or dramatized.
+
+## Contents
+
+- [The list](#the-list): what a line can look like
+- [What happens](#what-happens) and [how it picks](#how-it-picks)
+- [Options](#options) and the [config file](#config-file)
+- [Behaviour in detail](#behaviour-in-detail): queues, dead links, the audio check, sources
+- [The two halves on their own](#the-two-halves-on-their-own): `find`, `download`, `check`
+- [Extending](#extending): the source and downloader plugins, and [use from Go](#use-from-go)
+- [Contributing](CONTRIBUTING.md), [security](SECURITY.md), [license](#license)
 
 ## The list
 
@@ -137,26 +156,56 @@ A pick scoring 0.75 or more counts as a match (`-min-score`).
 | `-whisper-model FILE` | see below | whisper.cpp model used to listen to samples |
 | `-quiet` | off | only print the summaries |
 
+### Config file
+
+To avoid typing the folder and options every time, create
+`~/.config/audiobook-fetch/config.json`:
+
+```json
+{
+  "to": "/path/to/audiobooks",
+  "remove_after": true,
+  "sources": ["audiobookbay", "knaben"],
+  "downloader": "torbox",
+  "search_proxy": "",
+  "check": true,
+  "whisper_model": "/path/to/ggml-base.bin"
+}
+```
+
+Every key is optional. With `to` set, `audiobook-fetch books.txt` is the
+whole command.
+
+## Behaviour in detail
+
+### Removing from the downloader
+
 **`-remove-after`** only ever removes items this tool added, and only once
 every file of the item is on disk. Anything that was already in your account
 is left alone, even if it matches a link in the list.
 
-**Queues.** Some accounts may only fetch a few links at once and queue the
+### Queues
+
+Some accounts may only fetch a few links at once and queue the
 rest. The tool starts queued links itself as slots free up.
 
-**Links with no seeds.** A link nobody is seeding never finishes, and holds
+### Links with no seeds
+
+A link nobody is seeding never finishes, and holds
 one of those slots while it sits there. Once the downloader has made no
 progress on a link for `-stall-after`, the tool gives up on it, reports it as
 *no seeds*, and removes it from the downloader (if this tool added it) so the
 next link can start. When the link came from a search, the tool then tries
 the book's next-best listing, as long as that one also counts as a match and
 has nothing against it (an abridged or dramatized edition is never used as a
-fallback), and keeps going until one downloads or none are left. Those fallbacks are noted
-during the search, so trying them needs no further searching. If a book runs
+fallback), and keeps going until one downloads or none are left. Those
+fallbacks are noted during the search, so trying them needs no further searching. If a book runs
 out of listings that way, the sources its dead listing did not come from are
 searched once more before the tool gives up on it.
 
-**Checking what came down.** A listing's description is only a claim, so once
+### Checking what came down
+
+A listing's description is only a claim, so once
 an item's files are here the audio itself is examined:
 
 - *Does it play, and how good is it?* `ffprobe` (part of ffmpeg) reads every
@@ -182,9 +231,11 @@ the tool says so. The model is `-whisper-model`, else `whisper_model` in the
 config, else `WHISPER_MODEL`, else the first `ggml-*.bin` in
 `~/.config/audiobook-fetch/models/`.
 
-**Sources.** Each book is searched in the order the sources are given, and a
-later source is only asked when the earlier ones gave no near-certain match;
-then the best listing across all of them wins.
+### Sources
+
+Each book is searched in the order the sources are given, and a later source
+is only asked when the earlier ones gave no near-certain match; then the best
+listing across all of them wins.
 
 | Name | What it is |
 |------|------------|
@@ -197,11 +248,9 @@ bitrate and language are read from the name where it says. They do report how
 many people are seeding, and a listing nobody is seeding is never picked.
 
 **A source refusing you?** Sources limit how fast one address may search.
-The tool stops after three failures in a row instead of grinding on; wait and
-run again, raise `-delay`, or route searches another way, for example through
-an SSH tunnel: `ssh -N -D 1080 somehost` and
-`-search-proxy socks5://127.0.0.1:1080`. Downloads are not sent through the
-proxy.
+The tool stops after three failures in a row instead of grinding on; wait a
+while and run again, or raise `-delay`. `-search-proxy` sends searches (never
+downloads) through a proxy if your network needs one.
 
 ## The two halves on their own
 
@@ -218,7 +267,9 @@ moves and deletes nothing, and exits non-zero if it would reject any.
 
 ## Extending
 
-The work is two stages joined by a magnet link:
+Sources and downloaders are plugins: each is one Go package that implements
+a small interface and registers itself under a name. Nothing else in the
+code knows which ones exist. The work is two stages joined by a magnet link:
 
 ```
 list ──▶ Source ──▶ best listing ──▶ magnet link ──▶ Downloader ──▶ files
@@ -266,6 +317,11 @@ Either one registers itself from `init` with `fetch.RegisterSource` or
 searched in the order given, and later sources are skipped once an earlier
 one yields a near-certain match.
 
+Plugins are compiled in, not loaded at run time, so a new one means building
+the tool yourself or sending a pull request.
+[CONTRIBUTING.md](CONTRIBUTING.md#writing-a-plugin) walks through writing and
+testing one.
+
 ## Use from Go
 
 ```go
@@ -291,34 +347,17 @@ results, err := fetch.Download(service, links, opts)
 From any other language, run `find` or `download` with `-json -quiet`, or
 `check` with `-json`, and read stdout.
 
-## Layout
+## Contributing
 
-| Path | What |
-|------|------|
-| `list.go` | reading the list in its various shapes |
-| `scoring.go` | how a listing is scored against a wanted book |
-| `source.go` | the `Source` interface, its registry, polite page fetching |
-| `find.go` | search every source, score, inspect, choose |
-| `magnet.go` | building and parsing magnet links |
-| `downloader.go` | the `Downloader` interface and its registry |
-| `download.go` | links to files on disk, resumable |
-| `release.go` | unpacking a tracker's release name |
-| `verify.go` | checking the audio of what was downloaded |
-| `sources/audiobookbay/` | the AudioBook Bay source |
-| `sources/knaben/` | the Knaben source |
-| `sources/piratebay/` | The Pirate Bay source |
-| `downloaders/torbox/` | the TorBox downloader |
-| `cmd/audiobook-fetch/` | the command line |
-
-```sh
-go test ./...
-```
-
-The tests need no network and no audio tools: sources, downloaders, ffmpeg
-and whisper are all faked. CI runs them with the race detector and reports
-coverage on every push.
+Bug reports and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md)
+covers how the code is laid out, how to run the tests, and what a change
+needs before it can be merged.
 
 ## Security
 
 What the tool trusts and what it does not is written down in
 [SECURITY.md](SECURITY.md), along with how to report a problem.
+
+## License
+
+[MIT](LICENSE). The software is provided as is, without warranty of any kind.
