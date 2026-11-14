@@ -213,3 +213,18 @@ func TestCheckDoesNotRejectABookStillInsideAnArchive(t *testing.T) {
 		t.Errorf("verdict: %+v", v)
 	}
 }
+
+func TestCheckTreatsASecondEncodingOfTheSameFormatAsARepeat(t *testing.T) {
+	// As the Internet Archive ships a book: every chapter as the original
+	// MP3, again at 64 kbps, and again as Ogg.
+	tools := &fakeTools{kbps: 128, heard: []string{"en (p = 0.99)"}, kbpsFor: map[string]int{".ogg": 70}}
+	v := checkerWith(tools).Check(bookFiles(t, "ch_01.mp3", "ch_02.mp3", "ch_01_64kb.mp3", "ch_02_64kb.mp3", "ch_01.ogg", "ch_02.ogg", "cover.png"))
+	if v.AudioFiles != 2 || len(v.Duplicates) != 4 || !strings.Contains(v.Notes[0], "the same book in 3 formats: keeping mp3 (2 files, 128 kbps)") {
+		t.Fatalf("verdict: %+v", v)
+	}
+	for _, path := range v.Duplicates {
+		if name := filepath.Base(path); name == "ch_01.mp3" || name == "ch_02.mp3" {
+			t.Errorf("%s is the copy to keep", name)
+		}
+	}
+}

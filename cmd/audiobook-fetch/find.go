@@ -108,7 +108,7 @@ func cmdFind(args []string, cfg config) {
 // interrupted run loses nothing. Matches from an earlier run are reused.
 // stoppedEarly reports that the sources stopped answering.
 func findBooks(books []fetch.Wanted, dir string, s *searchFlags, quiet bool) (results []fetch.Result, stoppedEarly bool) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil { // the report says what was looked for
 		fatal(err)
 	}
 	previous := map[string]fetch.Result{}
@@ -200,7 +200,7 @@ func writeReport(dir string, results []fetch.Result, includeLow bool, downloads 
 			magnets.WriteString(r.Magnet + "\n")
 		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "magnets.txt"), []byte(magnets.String()), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "magnets.txt"), []byte(magnets.String()), 0o600); err != nil {
 		return err
 	}
 
@@ -208,11 +208,11 @@ func writeReport(dir string, results []fetch.Result, includeLow bool, downloads 
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "results.json"), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "results.json"), data, 0o600); err != nil {
 		return err
 	}
 
-	file, err := os.Create(filepath.Join(dir, "results.csv"))
+	file, err := os.OpenFile(filepath.Join(dir, "results.csv"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}

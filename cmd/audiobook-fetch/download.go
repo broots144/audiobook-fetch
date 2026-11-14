@@ -11,6 +11,7 @@ import (
 	"time"
 
 	fetch "github.com/broots144/audiobook-fetch"
+	"github.com/broots144/audiobook-fetch/downloaders/archive"
 )
 
 // downloadFlags are the options that shape the download half of the job.
@@ -94,15 +95,51 @@ func cmdDownload(args []string, cfg config) {
 	}
 }
 
-// downloadLinks runs the download, showing progress, and prints a summary.
+// downloadLinks sends each link to the downloader that can fetch it and
+// returns every result. The Internet Archive's links go straight to the
+// Archive, which needs no account; the rest go to the chosen service. One
+// downloader failing (no key, say) does not stop the other.
 func downloadLinks(magnets []fetch.Magnet, d *downloadFlags, quiet bool) ([]fetch.DownloadResult, error) {
-	key, err := readKey(d.name, d.keyFile)
-	if err != nil {
-		return nil, err
+	var direct, rest []fetch.Magnet
+	for _, m := range magnets {
+		if d.name != "archive" && archive.Handles(m.URI) {
+			direct = append(direct, m)
+		} else {
+			rest = append(rest, m)
+		}
 	}
-	service, err := fetch.NewDownloader(d.name, key)
+	var results []fetch.DownloadResult
+	var firstErr error
+	for _, group := range []struct {
+		name    string
+		magnets []fetch.Magnet
+	}{{"archive", direct}, {d.name, rest}} {
+		if len(group.magnets) == 0 {
+			continue
+		}
+		got, err := downloadWith(group.name, group.magnets, d, quiet)
+		results = append(results, got...)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return results, firstErr
+}
+
+// downloadWith runs the download through one downloader, showing progress,
+// and prints a summary.
+func downloadWith(name string, magnets []fetch.Magnet, d *downloadFlags, quiet bool) ([]fetch.DownloadResult, error) {
+	// A downloader with no account takes no key; one that needs a key says
+	// so itself when it is given none.
+	service, err := fetch.NewDownloader(name, "")
 	if err != nil {
-		return nil, err
+		key, keyErr := readKey(name, d.keyFile)
+		if keyErr != nil {
+			return nil, keyErr
+		}
+		if service, err = fetch.NewDownloader(name, key); err != nil {
+			return nil, err
+		}
 	}
 	opts := d.opts
 	if d.unpack {

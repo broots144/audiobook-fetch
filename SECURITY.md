@@ -42,6 +42,14 @@ download and the downloaded files themselves all come from strangers:
 - Answers from sources are size-limited, and text from them is written to
   the CSV report in a form spreadsheets will not run as a formula.
 
+**What it leaves on disk.** The state file and the reports in a download
+folder's `.audiobook-fetch/` say what was searched for and downloaded, so
+they are written readable by you alone (mode 600, in a folder of mode 700).
+
+**Releases.** Release binaries are built by GitHub Actions from the tagged
+commit, and each release carries SHA-256 checksums and signed build
+provenance: `gh attestation verify <file> --repo broots144/audiobook-fetch`.
+
 **The network.** The tool talks to the sources you enable, to the
 downloader, and to the download links the downloader hands back. Searches go
 through `-search-proxy` if you set one; downloads never do. Nothing else is

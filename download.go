@@ -143,7 +143,7 @@ func (s *state) save() error {
 		return err
 	}
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil { // a record of what was downloaded
 		return err
 	}
 	return os.Rename(tmp, s.path)
@@ -164,7 +164,7 @@ func Download(service Downloader, magnets []Magnet, opts DownloadOptions) ([]Dow
 		opts.now = time.Now
 	}
 	opts.Parallel = max(1, opts.Parallel)
-	if err := os.MkdirAll(BookkeepingDir(opts.Dest), 0o755); err != nil {
+	if err := os.MkdirAll(BookkeepingDir(opts.Dest), 0o700); err != nil {
 		return nil, err
 	}
 	st := loadState(opts.Dest, service)

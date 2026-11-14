@@ -147,6 +147,9 @@ func init() {
 		if box == nil {
 			return nil, errors.New("no fake service in this test")
 		}
+		if key == "" {
+			return nil, errors.New("FakeBox needs an API key")
+		}
 		box.key = key
 		return box, nil
 	})
@@ -901,4 +904,140 @@ func TestDownloadUnpacksAndKeepsOneFormat(t *testing.T) {
 	if !exists(other, "Frankenstein", "Frankenstein.zip") || !exists(other, "Frankenstein", "01.mp3") {
 		t.Error("with both off nothing is unpacked or moved")
 	}
+}
+
+func TestDoctorSaysWhatIsMissingAndHowToFixIt(t *testing.T) {
+	home := sandbox(t)
+
+	// A bare machine: no key, no config, only ffprobe.
+	var out bytes.Buffer
+	if cmdDoctor(nil, testConfig(), &out) {
+		t.Error("without a key the setup is not ready")
+	}
+	for _, want := range []string{"MISS downloader key", "FAKEBOX_API_KEY", "ok   sources            fakesite", "--   config file",
+		"--   download folder    not set", "ok   ffprobe", "--   ffmpeg", "--   whisper model", "--   rar and 7z", "Not ready"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q in:\n%s", want, out.String())
+		}
+	}
+
+	// With a key the service accepts, a folder and a config, it is ready,
+	// and the key itself is never shown.
+	t.Setenv("FAKEBOX_API_KEY", "the-secret-key")
+	write(t, filepath.Join(home, ".config", fetch.AppName, "config.json"), "{}")
+	cfg := testConfig()
+	cfg.To = home
+	out.Reset()
+	if !cmdDoctor(nil, cfg, &out) {
+		t.Errorf("should be ready:\n%s", out.String())
+	}
+	for _, want := range []string{"ok   downloader key     FakeBox accepts it (0 items in the account)", "ok   config file", "ok   download folder    " + home, "Ready."} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q in:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "the-secret-key") {
+		t.Error("the key must never be printed")
+	}
+
+	// -offline finds the key but does not try it; a bad source name or a
+	// folder that is not there is said plainly.
+	cfg.Sources, cfg.To = []string{"fakesite", "nosuchsite"}, filepath.Join(home, "gone")
+	out.Reset()
+	if cmdDoctor([]string{"-offline"}, cfg, &out) {
+		t.Error("an unknown source is not ready")
+	}
+	for _, want := range []string{"not tried: -offline", "MISS sources            config names nosuchsite", "cannot be reached right now"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q in:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestVersionString(t *testing.T) {
+	if got := versionString(); got == "" {
+		t.Error("a build always has something to call itself")
+	}
+	version = "v9.9.9"
+	defer func() { version = "" }()
+	if got := versionString(); got != "v9.9.9" {
+		t.Errorf("a release build reports its tag, got %q", got)
+	}
+}
+
+func TestArchiveLinksAreFetchedDirectlyWithNoKey(t *testing.T) {
+	home := sandbox(t)
+	const archiveHash = "64b9bedd5e330c548cd2b8f1c9dbc281b0bcda24"
+	// A stand-in for archive.org: hash lookup, item metadata, and the files.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/advancedsearch.php":
+			_, _ = w.Write([]byte(`{"response":{"docs":[{"identifier":"some_item"}]}}`))
+		case "/metadata/some_item":
+			_, _ = w.Write([]byte(`{"metadata":{"title":"Free Book","creator":"A. Writer"},"files":[
+				{"name":"01.mp3","source":"original","format":"VBR MP3","size":"5"},
+				{"name":"01_64kb.mp3","source":"derivative","format":"64Kbps MP3","size":"3"}]}`))
+		case "/download/some_item/01.mp3":
+			_, _ = w.Write([]byte("audio"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("ARCHIVE_URL", server.URL)
+
+	dest := filepath.Join(home, "library")
+	theirs := fetch.BuildMagnet(archiveHash, "Free Book", []string{"http://bt1.archive.org:6969/announce"})
+	links := write(t, filepath.Join(home, "magnets.txt"), theirs+"\n"+magnet(hashA)+"\n")
+
+	// No key at all: the Archive's book still arrives, and the link that
+	// needs the service is reported, not silently dropped.
+	var results []fetch.DownloadResult
+	var err error
+	_, stderr := capture(t, func() {
+		results, err = downloadLinks(mustMagnets(t, read(t, links)), flagsFor(t, dest), false)
+	})
+	if err == nil || !strings.Contains(err.Error(), "no API key for fakebox") {
+		t.Errorf("the service's link needs a key: %v", err)
+	}
+	if len(results) != 1 || results[0].Hash != archiveHash || results[0].Status != fetch.DownloadDone {
+		t.Fatalf("results: %+v\n%s", results, stderr)
+	}
+	if got := read(t, dest, "Free Book - A. Writer", "01.mp3"); got != "audio" {
+		t.Errorf("the original is fetched, got %q", got)
+	}
+	if exists(dest, "Free Book - A. Writer", "01_64kb.mp3") {
+		t.Error("the re-encoded copy should not be fetched")
+	}
+	if len(box.added) != 0 {
+		t.Errorf("nothing may be sent to the service without a key: %v", box.added)
+	}
+
+	// With a key, each link goes to the downloader that can fetch it.
+	t.Setenv("FAKEBOX_API_KEY", "k")
+	capture(t, func() { results, err = downloadLinks(mustMagnets(t, read(t, links)), flagsFor(t, dest), true) })
+	if err != nil || len(results) != 2 || strings.Join(box.added, ",") != hashA {
+		t.Errorf("results %+v, err %v, sent to the service: %v", results, err, box.added)
+	}
+}
+
+func mustMagnets(t *testing.T, text string) []fetch.Magnet {
+	t.Helper()
+	magnets, bad := fetch.ParseMagnets(text)
+	if bad != 0 || len(magnets) == 0 {
+		t.Fatalf("bad test links: %d bad, %d good", bad, len(magnets))
+	}
+	return magnets
+}
+
+// flagsFor gives the download options a command would have, for dest.
+func flagsFor(t *testing.T, dest string) *downloadFlags {
+	t.Helper()
+	var d downloadFlags
+	flags := flag.NewFlagSet("test", flag.ContinueOnError)
+	d.register(flags, testConfig())
+	if err := flags.Parse([]string{"-to", dest, "-poll", "1ms"}); err != nil {
+		t.Fatal(err)
+	}
+	return &d
 }
