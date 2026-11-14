@@ -34,6 +34,11 @@ func init() {
 // links as its plan allows.
 var errActiveLimit = errors.New("the account's active download limit is reached")
 
+// errNotQueued is TorBox saying a link is no longer in the queue. Its queue
+// listing lags a few seconds behind, so this is what starting a link twice
+// looks like: it has already left the queue.
+var errNotQueued = errors.New("the link is no longer queued")
+
 // BaseURL is the v1 API root.
 const BaseURL = "https://api.torbox.app/v1/api"
 
@@ -139,9 +144,12 @@ func (c *Client) callOnce(method, target string, body []byte, contentType string
 		if code, ok := env.Error.(string); ok && code != "" {
 			reason = code + ": " + reason
 		}
-		if strings.Contains(reason, "active download limit") {
+		switch {
+		case strings.Contains(reason, "active download limit"):
 			// Not a fault and not worth retrying: the account is simply full.
 			return 0, false, errActiveLimit
+		case strings.Contains(reason, "Queued Download does not exist"):
+			return 0, false, errNotQueued
 		}
 		return wait, retryable(resp.StatusCode), fmt.Errorf("HTTP %d: %s", resp.StatusCode, reason)
 	}
@@ -286,8 +294,8 @@ func (c *Client) AdvanceQueue(hashes []string) ([]string, error) {
 		if !full {
 			body, _ := json.Marshal(map[string]any{"queued_id": entry.ID, "operation": "start"})
 			err := c.call(http.MethodPost, "/queued/controlqueued", nil, body, "application/json", nil)
-			if err == nil {
-				continue // started: it will show up in List
+			if err == nil || errors.Is(err, errNotQueued) {
+				continue // started, now or a moment ago: it will show up in List
 			}
 			if !errors.Is(err, errActiveLimit) {
 				return nil, err

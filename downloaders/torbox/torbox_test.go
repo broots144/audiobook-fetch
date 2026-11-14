@@ -124,6 +124,10 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 			f.reply(w, http.StatusBadRequest, false, "unknown operation", nil)
 			return
 		}
+		if fmt.Sprint(body["queued_id"]) == "99" { // listed, but it left the queue a moment ago
+			f.reply(w, http.StatusInternalServerError, false, "Requested Queued Download does not exist for this user.", nil)
+			return
+		}
 		if f.room == 0 {
 			f.reply(w, http.StatusInternalServerError, false, "You have reached your active download limit of 3. Please upgrade your plan to add more torrents.", nil)
 			return
@@ -322,5 +326,21 @@ func TestAdvanceQueueStartsOursUntilTheAccountIsFull(t *testing.T) {
 	list, _ := c.List()
 	if !list[0].Stalled || list[1].Stalled || list[2].Stalled {
 		t.Errorf("stalled flags: %v, %v, %v", list[0].Stalled, list[1].Stalled, list[2].Stalled)
+	}
+}
+
+func TestAdvanceQueueToleratesAListingThatLagsBehind(t *testing.T) {
+	f, c := newFakeAPI(t)
+	f.queue = []map[string]any{{"id": 99, "hash": hashA, "type": "torrent"}, {"id": 3, "hash": hashB, "type": "torrent"}}
+	f.room = 5
+	var waits []time.Duration
+	c.Sleep = func(d time.Duration) { waits = append(waits, d) }
+
+	waiting, err := c.AdvanceQueue([]string{hashA, hashB})
+	if err != nil || len(waiting) != 0 {
+		t.Errorf("a link that already left the queue is not an error and is not waiting: waiting %v, err %v", waiting, err)
+	}
+	if f.startCalls != 2 || len(waits) != 0 {
+		t.Errorf("it must not be retried: %d start calls, waits %v", f.startCalls, waits)
 	}
 }
