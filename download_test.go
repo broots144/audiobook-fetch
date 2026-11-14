@@ -157,6 +157,7 @@ func (f *fakeService) Remove(item Item) error {
 func testOptions(t *testing.T) DownloadOptions {
 	opts := DefaultDownloadOptions()
 	opts.Dest = t.TempDir()
+	opts.StallAfter = 0 // tests that want links given up on say so
 	clock := time.Unix(0, 0)
 	opts.now = func() time.Time { return clock }
 	opts.sleep = func(d time.Duration) { clock = clock.Add(d) }
@@ -612,5 +613,64 @@ func TestALaterRunDoesNotHandFinishedOrQueuedLinksBackToTheService(t *testing.T)
 	opts.Redo = true
 	if results, err = Download(q, magnets[:1], opts); err != nil || len(f.added) != 4 || results[0].Status != DownloadDone {
 		t.Errorf("with Redo: err %v, added %v, result %+v", err, f.added, results[0])
+	}
+}
+
+func TestLinksThatMakeNoProgressAreGivenUpOnSoQueuedOnesStart(t *testing.T) {
+	f := newFakeService(t)
+	f.has(hashA, false, map[string]string{"A/a.mp3": "aaa"})
+	f.has(hashB, false, map[string]string{"B/b.mp3": "bbb"})
+	f.has(hashZ, false, map[string]string{"Z/z.mp3": "zzz"})
+	f.readyAfter[hashA] = -1 // nobody is seeding it
+	f.readyAfter[hashB] = 2
+	f.readyAfter[hashZ] = -1
+	q := &queueingService{fakeService: f, limit: 2}
+	// Z was put in the account by its owner, not by this tool.
+	f.items[hashZ] = &Item{ID: f.id(), Hash: hashZ, Name: "item-ffff", State: "stalled (no seeds)", Stalled: true}
+	opts := testOptions(t)
+	opts.Wait, opts.Poll, opts.StallAfter = time.Hour, time.Minute, 5*time.Minute
+	started := opts.now()
+
+	results, err := Download(q, []Magnet{magnetFor(hashA), magnetFor(hashB), magnetFor(hashZ)}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := results[0]; r.Status != DownloadNoSeeds || !r.Removed || !strings.Contains(r.Note, "no progress") {
+		t.Errorf("dead link: %+v", r)
+	}
+	if results[1].Status != DownloadDone || strings.Join(q.started, ",") != hashB {
+		t.Errorf("the queued link should get the freed slot: %+v, started %v", results[1], q.started)
+	}
+	if r := results[2]; r.Status != DownloadNoSeeds || r.Removed || f.items[hashZ] == nil {
+		t.Errorf("a dead link that was already in the account is given up on but left there: %+v", r)
+	}
+	if _, held := f.items[hashA]; held {
+		t.Error("the dead link this tool added should be off the service")
+	}
+	if waited := opts.now().Sub(started); waited > 10*time.Minute {
+		t.Errorf("waited %s; dead links should not cost the whole hour", waited)
+	}
+}
+
+func TestSlowButMovingLinksAreNotGivenUpOn(t *testing.T) {
+	f := newFakeService(t)
+	f.has(hashA, false, map[string]string{"A/a.mp3": "aaa"})
+	f.readyAfter[hashA] = -1
+	opts := testOptions(t)
+	opts.Wait, opts.Poll, opts.StallAfter = 20*time.Minute, time.Minute, 5*time.Minute
+	sleep := opts.sleep
+	opts.sleep = func(d time.Duration) { // a little further along at every check
+		f.mu.Lock()
+		f.items[hashA].Progress += 0.01
+		f.mu.Unlock()
+		sleep(d)
+	}
+
+	results, err := Download(f, []Magnet{magnetFor(hashA)}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Status != DownloadNotReady || len(f.removed) != 0 {
+		t.Errorf("a link that keeps moving is waited for: %+v, removed %v", results[0], f.removed)
 	}
 }

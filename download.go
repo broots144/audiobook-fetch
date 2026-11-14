@@ -26,6 +26,7 @@ const (
 	DownloadNotCached = "skipped_not_cached"
 	DownloadNotReady  = "not_ready"
 	DownloadStalled   = "stalled"
+	DownloadNoSeeds   = "no_seeds" // given up on: the service made no progress on it
 	DownloadFailed    = "failed"
 
 	partSuffix         = ".part"
@@ -42,6 +43,7 @@ type DownloadOptions struct {
 	Parallel    int           // files downloaded at once
 	Wait        time.Duration // how long to wait for the service to finish fetching
 	Poll        time.Duration // how often to check on items the service is still fetching
+	StallAfter  time.Duration // give up on a link the service makes no progress on for this long; 0 waits the full Wait
 	Idle        time.Duration // give up on a connection that sends nothing for this long
 	Log         func(format string, args ...any)
 	OnBytes     func(n int64) // called as data arrives, for progress display
@@ -52,7 +54,8 @@ type DownloadOptions struct {
 
 // DefaultDownloadOptions are the settings the CLI starts from.
 func DefaultDownloadOptions() DownloadOptions {
-	return DownloadOptions{Parallel: 3, Wait: time.Hour, Poll: 20 * time.Second, Idle: 90 * time.Second}
+	return DownloadOptions{Parallel: 3, Wait: time.Hour, Poll: 20 * time.Second, Idle: 90 * time.Second,
+		StallAfter: 5 * time.Minute}
 }
 
 // DownloadResult is the outcome for one magnet link.
@@ -199,6 +202,7 @@ func Download(service Downloader, magnets []Magnet, opts DownloadOptions) ([]Dow
 	// one first in that case: cached links are ready the moment they are
 	// added, and should not sit through a whole poll interval.
 	deadline := opts.now().Add(opts.Wait)
+	watch := map[string]progressMark{}
 	for refresh := addedAny; len(pending) > 0; refresh = true {
 		if refresh {
 			if account, err = service.List(); err != nil {
@@ -219,6 +223,30 @@ func Download(service Downloader, magnets []Magnet, opts DownloadOptions) ([]Dow
 			r := results[i]
 			opts.Log("[%d/%d] %s  %s: %d files, %s%s  %s", i+1, len(magnets), short(m.Hash), r.Status,
 				r.Files, humanBytes(r.Size), removedNote(r, name), r.Name)
+		}
+
+		// A link nobody is seeding never finishes, and meanwhile holds one
+		// of the account's few active slots. Give up on anything that has
+		// not moved for StallAfter, so the links behind it get their turn.
+		// The service's first report cannot be trusted for this (everything
+		// has no seeds in its first minute), hence the patience.
+		for i, m := range magnets {
+			item, held := present[m.Hash]
+			if opts.StallAfter <= 0 || !pending[i] || !held {
+				delete(watch, m.Hash)
+				continue
+			}
+			mark, watched := watch[m.Hash]
+			if !watched || item.Progress > mark.progress {
+				watch[m.Hash] = progressMark{item.Progress, opts.now()}
+				continue
+			}
+			if item.Progress >= 1 || opts.now().Sub(mark.since) < opts.StallAfter {
+				continue
+			}
+			delete(pending, i)
+			results[i] = giveUp(service, item, st, opts)
+			opts.Log("[%d/%d] %s  no seeds: %s", i+1, len(magnets), short(m.Hash), results[i].Note)
 		}
 		if len(pending) == 0 {
 			break
@@ -283,6 +311,34 @@ func Download(service Downloader, magnets []Magnet, opts DownloadOptions) ([]Dow
 		opts.sleep(opts.Poll)
 	}
 	return results, nil
+}
+
+// progressMark is how far the service had got with a link, and since when.
+type progressMark struct {
+	progress float64
+	since    time.Time
+}
+
+// giveUp stops waiting for a link the service is getting nowhere with, and
+// takes it off the service if this tool put it there.
+func giveUp(service Downloader, item Item, st *state, opts DownloadOptions) DownloadResult {
+	hash, name := strings.ToLower(item.Hash), service.Name()
+	result := DownloadResult{Hash: hash, Name: item.Name, Status: DownloadNoSeeds}
+	result.Note = fmt.Sprintf("%s made no progress on it for %s (%s, %.0f%%)", name, opts.StallAfter, item.State, item.Progress*100)
+	if !st.Added[hash] {
+		return result // it was in the account before this tool came along
+	}
+	if err := service.Remove(item); err != nil {
+		result.Note += "; could not remove it from " + name + ": " + err.Error()
+		return result
+	}
+	result.Removed = true
+	result.Note += "; removed from " + name
+	delete(st.Added, hash)
+	if err := st.save(); err != nil {
+		result.Note += ", but could not update the state file: " + err.Error()
+	}
+	return result
 }
 
 func indexByHash(items []Item) map[string]Item {

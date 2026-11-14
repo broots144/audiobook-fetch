@@ -114,6 +114,7 @@ A pick scoring 0.75 or more counts as a match (`-min-score`).
 | `-delay D` | `3s` | pause between requests to a source |
 | `-search-proxy URL` | none | send searches through a proxy |
 | `-wait D` | `1h` | how long to wait for the downloader to fetch what it lacks |
+| `-stall-after D` | `5m` | give up on a link the downloader makes no progress on for this long (`0` keeps waiting) |
 | `-parallel N` | `3` | files to download at once |
 | `-fresh` | off | search every book again, ignoring earlier matches |
 | `-redo` | off | download links again even if an earlier run completed them |
@@ -123,11 +124,17 @@ A pick scoring 0.75 or more counts as a match (`-min-score`).
 every file of the item is on disk. Anything that was already in your account
 is left alone, even if it matches a link in the list.
 
-**Queues and stalled links.** Some accounts may only fetch a few links at
-once and queue the rest. The tool starts queued links itself as slots free
-up. A link the service cannot fetch (no seeds) is reported as *stalled*: it
-holds a slot for as long as it stays, so remove it there if others are
-waiting behind it.
+**Queues.** Some accounts may only fetch a few links at once and queue the
+rest. The tool starts queued links itself as slots free up.
+
+**Links with no seeds.** A link nobody is seeding never finishes, and holds
+one of those slots while it sits there. Once the downloader has made no
+progress on a link for `-stall-after`, the tool gives up on it, reports it as
+*no seeds*, and removes it from the downloader (if this tool added it) so the
+next link can start. When the link came from a search, the tool then tries
+the book's next-best listing, as long as that one also counts as a match, and
+keeps going until one downloads or none are left. Those fallbacks are noted
+during the search, so trying them needs no further searching.
 
 **A source refusing you?** Sources limit how fast one address may search.
 The tool stops after three failures in a row instead of grinding on; wait and

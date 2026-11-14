@@ -40,6 +40,15 @@ type RunnerUp struct {
 	Heading string  `json:"heading"`
 }
 
+// Alternate is another listing of the same book that also passed as a match:
+// the one to turn to when the chosen listing cannot be downloaded.
+type Alternate struct {
+	Score     float64    `json:"score"`
+	Breakdown *Score     `json:"breakdown,omitempty"`
+	Candidate *Candidate `json:"candidate"`
+	Magnet    string     `json:"magnet"`
+}
+
 // Result is the outcome for one wanted book.
 type Result struct {
 	Wanted    Wanted     `json:"wanted"`
@@ -49,7 +58,24 @@ type Result struct {
 	Candidate *Candidate `json:"candidate,omitempty"`
 	Magnet    string     `json:"magnet"`
 	RunnersUp []RunnerUp `json:"runners_up,omitempty"`
-	Note      string     `json:"note"`
+	// Alternates are the other trusted matches, next best first. They cost
+	// nothing extra to find: their pages were read while choosing.
+	Alternates []Alternate `json:"alternates,omitempty"`
+	Note       string      `json:"note"`
+}
+
+// NextBest replaces the chosen listing with the best alternate, for when the
+// chosen one turned out to be undownloadable (why says how). It reports
+// false, changing nothing, when there is no alternate left.
+func (r *Result) NextBest(why string) bool {
+	if len(r.Alternates) == 0 {
+		return false
+	}
+	next := r.Alternates[0]
+	r.Alternates = r.Alternates[1:]
+	r.Score, r.Breakdown, r.Candidate, r.Magnet = next.Score, next.Breakdown, next.Candidate, next.Magnet
+	r.Note = strings.TrimSuffix("next-best listing: "+why+"; "+r.Note, "; ")
+	return true
 }
 
 // scored is a candidate with its score and the source that can tell us more
@@ -229,6 +255,19 @@ func find(w Wanted, sources []Source, opts Options) (Result, error) {
 	byScoreThenQuality(finalists, opts.QualityTie, opts.MinScore)
 	winner := finalists[0]
 
+	// Other listings that are just as surely this book, kept as fallbacks.
+	var alternates []Alternate
+	offered := map[string]bool{winner.cand.InfoHash: true}
+	for _, f := range finalists[1:] {
+		if f.score.Total < opts.MinScore || offered[f.cand.InfoHash] {
+			continue
+		}
+		offered[f.cand.InfoHash] = true
+		score := f.score
+		alternates = append(alternates, Alternate{score.Total, &score, f.cand,
+			BuildMagnet(f.cand.InfoHash, f.cand.Heading, f.cand.Trackers)})
+	}
+
 	rest := append(finalists[1:], others...)
 	byScore(rest)
 	var runnersUp []RunnerUp
@@ -241,13 +280,14 @@ func find(w Wanted, sources []Source, opts Options) (Result, error) {
 		status = StatusLowConfidence
 	}
 	return Result{
-		Wanted:    w,
-		Status:    status,
-		Score:     winner.score.Total,
-		Breakdown: &winner.score,
-		Candidate: winner.cand,
-		Magnet:    BuildMagnet(winner.cand.InfoHash, winner.cand.Heading, winner.cand.Trackers),
-		RunnersUp: runnersUp,
-		Note:      strings.Join(winner.score.Notes, "; "),
+		Wanted:     w,
+		Status:     status,
+		Score:      winner.score.Total,
+		Breakdown:  &winner.score,
+		Candidate:  winner.cand,
+		Magnet:     BuildMagnet(winner.cand.InfoHash, winner.cand.Heading, winner.cand.Trackers),
+		RunnersUp:  runnersUp,
+		Alternates: alternates,
+		Note:       strings.Join(winner.score.Notes, "; "),
 	}, nil
 }

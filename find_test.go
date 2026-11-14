@@ -432,3 +432,34 @@ func TestRegistries(t *testing.T) {
 		t.Error("a bad proxy address should be refused")
 	}
 }
+
+func TestOtherTrustedListingsAreKeptAsFallbacks(t *testing.T) {
+	src := &fakeSource{
+		listings: map[string][]Candidate{"Dune Herbert": {
+			{Heading: "Dune - Frank Herbert", URL: "u/best", Language: "English", Format: "M4B", Bitrate: "128 Kbps"},
+			{Heading: "Dune - Frank Herbert", URL: "u/second", Language: "English", Format: "MP3", Bitrate: "64 Kbps"},
+			{Heading: "Dune - Frank Herbert", URL: "u/same", Language: "English", Format: "MP3", Bitrate: "32 Kbps"},
+			{Heading: "Dune (BBC Dramatization) - Frank Herbert", URL: "u/drama", Language: "English"},
+		}},
+		details: map[string]Candidate{
+			"u/best":   {Authors: []string{"Frank Herbert"}, InfoHash: "aaa"},
+			"u/second": {Authors: []string{"Frank Herbert"}, InfoHash: "bbb"},
+			"u/same":   {Authors: []string{"Frank Herbert"}, InfoHash: "aaa"}, // the winner's files, listed twice
+			"u/drama":  {Authors: []string{"Frank Herbert"}, InfoHash: "ccc"}, // not a trusted match
+		},
+	}
+	r := Find(Wanted{Title: "Dune", Author: "Frank Herbert"}, []Source{src}, DefaultOptions())
+
+	if r.Candidate.URL != "u/best" || len(r.Alternates) != 1 || r.Alternates[0].Candidate.URL != "u/second" {
+		t.Fatalf("picked %s with alternates %+v; want only the other trusted, different listing", r.Candidate.URL, r.Alternates)
+	}
+	if !r.NextBest("the first had no seeds") {
+		t.Fatal("there was an alternate to move to")
+	}
+	if r.Candidate.URL != "u/second" || !strings.Contains(r.Magnet, "btih:bbb") || !strings.Contains(r.Note, "no seeds") {
+		t.Errorf("after moving on: %s, %s, note %q", r.Candidate.URL, r.Magnet, r.Note)
+	}
+	if r.NextBest("again") || r.Candidate.URL != "u/second" {
+		t.Error("with no alternate left, the result must stay as it is")
+	}
+}

@@ -248,15 +248,25 @@ func cmdGet(args []string, cfg config) {
 		os.Exit(1)
 	}
 
-	fmt.Fprintf(os.Stderr, "\ndownloading %d item(s) to %s\n", len(links), dest)
-	downloads, err := downloadLinks(links, &download, *quiet)
-	if err != nil {
-		fatal(err)
-	}
+	// Download, and for every book whose listing nobody is seeding, move to
+	// its next-best listing and go again until one works or none are left.
 	byHash := map[string]fetch.DownloadResult{}
+	for len(links) > 0 {
+		fmt.Fprintf(os.Stderr, "\ndownloading %d item(s) to %s\n", len(links), dest)
+		downloads, err := downloadLinks(links, &download, *quiet)
+		if err != nil {
+			fatal(err)
+		}
+		for _, d := range downloads {
+			byHash[d.Hash] = d
+		}
+		links = nextBestLinks(results, byHash, seen, search.includeLow)
+		if len(links) > 0 {
+			fmt.Fprintf(os.Stderr, "\n%d book(s) had a listing with no seeds; trying the next-best listing of each\n", len(links))
+		}
+	}
 	failed := 0
-	for _, d := range downloads {
-		byHash[d.Hash] = d
+	for _, d := range byHash {
 		if d.Status == fetch.DownloadFailed {
 			failed++
 		}
@@ -265,11 +275,17 @@ func cmdGet(args []string, cfg config) {
 		if err := writeReport(reportDir, results, search.includeLow, byHash); err != nil {
 			fatal(err)
 		}
-		attention := 0
+		attention, unseeded := 0, 0
 		for _, r := range results {
 			if !actionable(r, search.includeLow) {
 				attention++
+			} else if byHash[r.Candidate.InfoHash].Status == fetch.DownloadNoSeeds {
+				unseeded++
 			}
+		}
+		if unseeded > 0 {
+			fmt.Fprintf(os.Stderr, "%d book(s) were not downloaded because no matching listing has seeds right now; see %s\n",
+				unseeded, filepath.Join(reportDir, "results.csv"))
 		}
 		if attention > 0 {
 			fmt.Fprintf(os.Stderr, "%d book(s) were not downloaded because no confident match was found; see %s\n",
@@ -279,4 +295,28 @@ func cmdGet(args []string, cfg config) {
 	if failed > 0 || stoppedEarly {
 		os.Exit(1)
 	}
+}
+
+// nextBestLinks moves every book whose chosen listing came back with no
+// seeds on to its next-best listing, and returns the links to try now.
+// A listing already tried (tried holds every hash sent so far) is passed
+// over, so two books sharing a bundle do not send it twice.
+func nextBestLinks(results []fetch.Result, downloads map[string]fetch.DownloadResult, tried map[string]bool, includeLow bool) []fetch.Magnet {
+	var links []fetch.Magnet
+	for i := range results {
+		r := &results[i]
+		if !actionable(*r, includeLow) || downloads[r.Candidate.InfoHash].Status != fetch.DownloadNoSeeds {
+			continue
+		}
+		for r.NextBest("the first choice had no seeds") {
+			if hash := r.Candidate.InfoHash; !tried[hash] {
+				tried[hash] = true
+				links = append(links, fetch.Magnet{Hash: hash, URI: r.Magnet})
+				break
+			} else if downloads[hash].Status != fetch.DownloadNoSeeds {
+				break // another book already brought this listing in
+			}
+		}
+	}
+	return links
 }

@@ -29,6 +29,7 @@ func (d *downloadFlags) register(flags *flag.FlagSet, cfg config) {
 	flags.BoolVar(&d.opts.CachedOnly, "cached-only", false, "skip links the service would have to fetch first")
 	flags.IntVar(&d.opts.Parallel, "parallel", d.opts.Parallel, "files to download at once")
 	flags.DurationVar(&d.opts.Wait, "wait", d.opts.Wait, "how long to wait for the service to fetch links it does not have yet")
+	flags.DurationVar(&d.opts.StallAfter, "stall-after", d.opts.StallAfter, "give up on a link the service makes no progress on for this long, freeing its slot (0 = keep waiting)")
 	flags.DurationVar(&d.opts.Poll, "poll", d.opts.Poll, "how often to check on links the service is still fetching")
 	flags.StringVar(&d.keyFile, "key-file", "", "file holding the service's API key (default: <name>.key in the config folder, or the <NAME>_API_KEY variable)")
 }
@@ -119,13 +120,17 @@ func downloadLinks(magnets []fetch.Magnet, d *downloadFlags, quiet bool) ([]fetc
 			removed++
 		}
 	}
-	fmt.Fprintf(os.Stderr, "\n%d links: %d downloaded, %d not ready yet, %d stalled, %d skipped (not cached), %d failed\n",
-		len(results), counts[fetch.DownloadDone], counts[fetch.DownloadNotReady], counts[fetch.DownloadStalled],
-		counts[fetch.DownloadNotCached], counts[fetch.DownloadFailed])
+	fmt.Fprintf(os.Stderr, "\n%d links: %d downloaded, %d no seeds, %d not ready yet, %d stalled, %d skipped (not cached), %d failed\n",
+		len(results), counts[fetch.DownloadDone], counts[fetch.DownloadNoSeeds], counts[fetch.DownloadNotReady],
+		counts[fetch.DownloadStalled], counts[fetch.DownloadNotCached], counts[fetch.DownloadFailed])
 	fmt.Fprintf(os.Stderr, "%d files complete in %s (%d fetched this run, %.2f GB, %s)\n",
 		files, opts.Dest, fetched, float64(bytes)/1e9, time.Since(start).Round(time.Second))
 	if opts.RemoveAfter {
 		fmt.Fprintf(os.Stderr, "%d item(s) removed from %s\n", removed, service.Name())
+	}
+	if counts[fetch.DownloadNoSeeds] > 0 {
+		fmt.Fprintf(os.Stderr, "%d link(s) were given up on: %s made no progress on them for %s (usually nobody is seeding them)\n",
+			counts[fetch.DownloadNoSeeds], service.Name(), opts.StallAfter)
 	}
 	if counts[fetch.DownloadStalled] > 0 {
 		fmt.Fprintf(os.Stderr, "%d link(s) are stalled on %s with nothing to fetch them from, each holding an active slot;\n"+
