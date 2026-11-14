@@ -409,6 +409,9 @@ func TestLocalPathStaysInsideDestination(t *testing.T) {
 		"Folder/trailing dot./f.": "Folder/trailing dot/f",
 		"loose.mp3":               "The Item/loose.mp3",
 		"..":                      "",
+		// The tool's own folder holds its state and the rejected files.
+		".audiobook-fetch/state.json":   "",
+		".Audiobook-Fetch/rejected/x.y": "",
 	}
 	for name, want := range cases {
 		got, err := localPath(dest, item, File{ID: "1", Path: name})

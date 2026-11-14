@@ -270,7 +270,9 @@ func (c *Checker) probeAll(audio []string) []probed {
 // audio in it, comes back with zero seconds.
 func (c *Checker) probe(path string) probed {
 	f := probed{path: path}
-	stdout, _, err := c.exec(c.FFprobe, "-v", "error", "-show_entries",
+	// A downloaded file is untrusted, and some formats (playlists) can name
+	// other things to open. Only local files are ever read.
+	stdout, _, err := c.exec(c.FFprobe, "-v", "error", "-protocol_whitelist", "file", "-show_entries",
 		"format=duration,bit_rate:format_tags=title,album,comment:stream=codec_name,codec_type", "-of", "json", path)
 	if err != nil {
 		return f
@@ -389,7 +391,7 @@ func locate(files []probed, at float64) (probed, float64) {
 // cut writes length of audio from path, starting at offset seconds, as the
 // 16 kHz mono WAV whisper.cpp wants.
 func (c *Checker) cut(path string, offset float64, length time.Duration, wav string) error {
-	_, _, err := c.exec(c.FFmpeg, "-v", "error", "-y", "-ss", strconv.FormatFloat(offset, 'f', 1, 64),
+	_, _, err := c.exec(c.FFmpeg, "-v", "error", "-y", "-protocol_whitelist", "file", "-ss", strconv.FormatFloat(offset, 'f', 1, 64),
 		"-t", strconv.Itoa(int(length.Seconds())), "-i", path, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", wav)
 	return err
 }

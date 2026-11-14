@@ -233,12 +233,24 @@ func writeReport(dir string, results []fetch.Result, includeLow bool, downloads 
 		if d, ok := downloads[c.InfoHash]; ok && actionable(r, includeLow) {
 			download = d.Status
 		}
-		_ = w.Write([]string{r.Wanted.Raw, r.Status, download, fmt.Sprintf("%.2f", r.Score), c.Heading, c.Source,
+		_ = w.Write(plainCells([]string{r.Wanted.Raw, r.Status, download, fmt.Sprintf("%.2f", r.Score), c.Heading, c.Source,
 			strings.Join(c.Authors, ", "), strings.Join(c.Narrators, ", "), c.Edition,
-			c.Language, c.Format, c.Bitrate, c.Size, strings.Join(runners, " / "), r.Note, c.URL, r.Magnet})
+			c.Language, c.Format, c.Bitrate, c.Size, strings.Join(runners, " / "), r.Note, c.URL, r.Magnet}))
 	}
 	w.Flush()
 	return w.Error()
+}
+
+// plainCells keeps a spreadsheet from running a cell as a formula. Headings
+// come from web pages, and one starting with = + - or @ would be executed
+// when the report is opened; a leading apostrophe makes it plain text.
+func plainCells(cells []string) []string {
+	for i, cell := range cells {
+		if cell != "" && strings.ContainsRune("=+-@\t\r", rune(cell[0])) {
+			cells[i] = "'" + cell
+		}
+	}
+	return cells
 }
 
 var marks = map[string]string{

@@ -538,6 +538,9 @@ func localPath(dest string, item Item, file File) (string, error) {
 		}
 		parts = append([]string{folder}, parts...)
 	}
+	if strings.EqualFold(parts[0], filepath.Base(BookkeepingDir(dest))) {
+		return "", fmt.Errorf("file %s would be written into the tool's own folder", file.ID)
+	}
 	path := filepath.Join(append([]string{dest}, parts...)...)
 	if rel, err := filepath.Rel(dest, path); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("file %s would be written outside the destination", file.ID)

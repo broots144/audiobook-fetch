@@ -66,6 +66,10 @@ func sortedKeys[V any](m map[string]V) []string {
 const fetcherUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
 	"(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+// maxPageBytes caps how much of one answer is read, so a source that
+// misbehaves cannot fill memory.
+const maxPageBytes = 16 << 20
+
 // Fetcher gets web pages politely for a source: one request at a time, a
 // pause between requests, and backoff when the site pushes back.
 type Fetcher struct {
@@ -153,9 +157,12 @@ func (f *Fetcher) once(target string, payload []byte) (body string, retry bool, 
 	case resp.StatusCode >= 400:
 		return "", false, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxPageBytes+1))
 	if err != nil {
 		return "", true, err
+	}
+	if len(data) > maxPageBytes {
+		return "", false, fmt.Errorf("answer is larger than %d MB", maxPageBytes>>20)
 	}
 	return string(data), false, nil
 }

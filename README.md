@@ -1,5 +1,7 @@
 # audiobook-fetch
 
+[![CI](https://github.com/broots144/audiobook-fetch/actions/workflows/ci.yml/badge.svg)](https://github.com/broots144/audiobook-fetch/actions/workflows/ci.yml)
+
 Give it a list of audiobooks and a folder. It finds each one, picks the best
 edition on its own, and downloads the files into the folder.
 
@@ -23,11 +25,19 @@ half. More of either can be added (see [Extending](#extending)).
 
 ## Set up
 
+Needs Go 1.27 or newer. From a checkout:
+
 ```sh
 go build -o bin/audiobook-fetch ./cmd/audiobook-fetch
 ```
 
-Put your TorBox API key in `~/.config/audiobook-fetch/torbox.key`, or set
+or, without one, `go install github.com/broots144/audiobook-fetch/cmd/audiobook-fetch@latest`.
+For the optional [audio check](#options), also install `ffmpeg` and
+`whisper-cpp` (both are in Homebrew and most package managers) and download a
+whisper.cpp model such as `ggml-base.bin`.
+
+Put your TorBox API key in `~/.config/audiobook-fetch/torbox.key` (and
+`chmod 600` it; the tool warns if other users can read it), or set
 `TORBOX_API_KEY`. To avoid typing the folder every time, create
 `~/.config/audiobook-fetch/config.json`:
 
@@ -278,8 +288,8 @@ opts.Dest = "/path/to/folder"
 results, err := fetch.Download(service, links, opts)
 ```
 
-From any other language, run `find` or `download` with `-json -quiet` and
-read stdout.
+From any other language, run `find` or `download` with `-json -quiet`, or
+`check` with `-json`, and read stdout.
 
 ## Layout
 
@@ -293,6 +303,7 @@ read stdout.
 | `downloader.go` | the `Downloader` interface and its registry |
 | `download.go` | links to files on disk, resumable |
 | `release.go` | unpacking a tracker's release name |
+| `verify.go` | checking the audio of what was downloaded |
 | `sources/audiobookbay/` | the AudioBook Bay source |
 | `sources/knaben/` | the Knaben source |
 | `sources/piratebay/` | The Pirate Bay source |
@@ -303,4 +314,11 @@ read stdout.
 go test ./...
 ```
 
-The tests need no network: sources and downloaders are faked.
+The tests need no network and no audio tools: sources, downloaders, ffmpeg
+and whisper are all faked. CI runs them with the race detector and reports
+coverage on every push.
+
+## Security
+
+What the tool trusts and what it does not is written down in
+[SECURITY.md](SECURITY.md), along with how to report a problem.
