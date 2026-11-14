@@ -25,4 +25,4 @@ The first release.
   the best; the others are moved aside.
 - **Commands.** `find`, `download`, `check`, `tidy`, `doctor`, `version`.
 - Prebuilt binaries for macOS, Linux and Windows, with checksums and build
-  provenance, and a Homebrew formula.
+  provenance.
