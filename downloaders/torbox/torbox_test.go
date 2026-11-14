@@ -31,6 +31,9 @@ type fakeAPI struct {
 	rateLimits int // answer this many API calls with 429 first
 	calls      int
 	addedForms []string
+	queue      []map[string]any // waiting links
+	room       int              // how many more the account will start
+	startCalls int
 	deleted    []map[string]any
 	linkQuery  string
 }
@@ -107,6 +110,33 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		f.torrents = kept
 		f.reply(w, http.StatusOK, true, "deleted", nil)
+	case "/queued/getqueued":
+		if r.URL.Query().Get("type") != "torrent" {
+			f.reply(w, http.StatusBadRequest, false, "expected type=torrent", nil)
+			return
+		}
+		f.reply(w, http.StatusOK, true, "ok", f.queue)
+	case "/queued/controlqueued":
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.startCalls++
+		if body["operation"] != "start" {
+			f.reply(w, http.StatusBadRequest, false, "unknown operation", nil)
+			return
+		}
+		if f.room == 0 {
+			f.reply(w, http.StatusInternalServerError, false, "You have reached your active download limit of 3. Please upgrade your plan to add more torrents.", nil)
+			return
+		}
+		f.room--
+		kept := f.queue[:0]
+		for _, q := range f.queue {
+			if fmt.Sprint(q["id"]) != fmt.Sprint(body["queued_id"]) {
+				kept = append(kept, q)
+			}
+		}
+		f.queue = kept
+		f.reply(w, http.StatusOK, true, "Queued download startd successfully.", nil)
 	default:
 		f.reply(w, http.StatusNotFound, false, "no such endpoint", nil)
 	}
@@ -247,5 +277,42 @@ func TestRegisteredAndWorksEndToEnd(t *testing.T) {
 	}
 	if len(f.torrents) != 0 {
 		t.Errorf("the item should have been removed from the account: %v", f.torrents)
+	}
+}
+
+func TestAdvanceQueueStartsOursUntilTheAccountIsFull(t *testing.T) {
+	f, c := newFakeAPI(t)
+	other := "dddddddddddddddddddddddddddddddddddddddd"
+	hashC := "cccccccccccccccccccccccccccccccccccccccc"
+	f.queue = []map[string]any{
+		{"id": 1, "hash": other, "type": "torrent"}, // someone else's: never touched
+		{"id": 2, "hash": strings.ToUpper(hashA), "type": "torrent"},
+		{"id": 3, "hash": hashB, "type": "torrent"},
+		{"id": 4, "hash": hashC, "type": "torrent"},
+	}
+	f.room = 1
+	var waits []time.Duration
+	c.Sleep = func(d time.Duration) { waits = append(waits, d) }
+
+	var queuer fetch.Queuer = c
+	waiting, err := queuer.AdvanceQueue([]string{hashA, hashB, hashC})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(waiting, ",") != hashB+","+hashC {
+		t.Errorf("waiting = %v, want the two that did not fit", waiting)
+	}
+	if len(f.queue) != 3 || f.queue[0]["hash"] != other {
+		t.Errorf("only the first of ours should have left the queue: %v", f.queue)
+	}
+	if f.startCalls != 2 || len(waits) != 0 {
+		t.Errorf("a full account must end the attempts at once, without retries: %d start calls, waits %v", f.startCalls, waits)
+	}
+
+	items := []map[string]any{{"id": 5, "hash": hashA, "download_state": "stalled (no seeds)"}, {"id": 6, "hash": hashB, "download_state": "downloading"}}
+	f.torrents = items
+	list, _ := c.List()
+	if !list[0].Stalled || list[1].Stalled {
+		t.Errorf("stalled flags: %v, %v", list[0].Stalled, list[1].Stalled)
 	}
 }

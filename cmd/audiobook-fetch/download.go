@@ -118,12 +118,17 @@ func downloadLinks(magnets []fetch.Magnet, d *downloadFlags, quiet bool) ([]fetc
 			removed++
 		}
 	}
-	fmt.Fprintf(os.Stderr, "\n%d links: %d downloaded, %d not ready yet, %d skipped (not cached), %d failed\n",
-		len(results), counts[fetch.DownloadDone], counts[fetch.DownloadNotReady], counts[fetch.DownloadNotCached], counts[fetch.DownloadFailed])
+	fmt.Fprintf(os.Stderr, "\n%d links: %d downloaded, %d not ready yet, %d stalled, %d skipped (not cached), %d failed\n",
+		len(results), counts[fetch.DownloadDone], counts[fetch.DownloadNotReady], counts[fetch.DownloadStalled],
+		counts[fetch.DownloadNotCached], counts[fetch.DownloadFailed])
 	fmt.Fprintf(os.Stderr, "%d files complete in %s (%d fetched this run, %.2f GB, %s)\n",
 		files, opts.Dest, fetched, float64(bytes)/1e9, time.Since(start).Round(time.Second))
 	if opts.RemoveAfter {
 		fmt.Fprintf(os.Stderr, "%d item(s) removed from %s\n", removed, service.Name())
+	}
+	if counts[fetch.DownloadStalled] > 0 {
+		fmt.Fprintf(os.Stderr, "%d link(s) are stalled on %s with nothing to fetch them from, each holding an active slot;\n"+
+			"remove them there if queued links are waiting\n", counts[fetch.DownloadStalled], service.Name())
 	}
 	if counts[fetch.DownloadNotReady] > 0 {
 		fmt.Fprintf(os.Stderr, "run the same command again later to collect what %s is still fetching\n", service.Name())

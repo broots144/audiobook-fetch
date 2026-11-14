@@ -446,3 +446,120 @@ func TestParseMagnets(t *testing.T) {
 		t.Errorf("the full link should be kept: %s", magnets[0].URI)
 	}
 }
+
+// queueingService is a fakeService whose account fetches only a few links
+// at once; the rest wait in a queue that never moves unless it is told to.
+type queueingService struct {
+	*fakeService
+	limit   int
+	queue   []string // magnets waiting, oldest first
+	started []string
+}
+
+func (q *queueingService) active() int {
+	n := 0
+	for _, item := range q.items {
+		if !item.Ready {
+			n++
+		}
+	}
+	return n
+}
+
+func (q *queueingService) Add(magnet string) error {
+	q.mu.Lock()
+	full := q.active() >= q.limit
+	if full {
+		q.queue = append(q.queue, magnet)
+		q.added = append(q.added, NormalizeHash(btih.FindStringSubmatch(magnet)[1]))
+	}
+	q.mu.Unlock()
+	if full {
+		return nil
+	}
+	return q.fakeService.Add(magnet)
+}
+
+func (q *queueingService) AdvanceQueue(hashes []string) ([]string, error) {
+	wanted := map[string]bool{}
+	for _, h := range hashes {
+		wanted[h] = true
+	}
+	var waiting, left []string
+	for _, magnet := range q.queue {
+		hash := NormalizeHash(btih.FindStringSubmatch(magnet)[1])
+		q.mu.Lock()
+		room := q.active() < q.limit
+		q.mu.Unlock()
+		if !wanted[hash] || !room {
+			left = append(left, magnet)
+			if wanted[hash] {
+				waiting = append(waiting, hash)
+			}
+			continue
+		}
+		added := len(q.added)
+		_ = q.fakeService.Add(magnet)
+		q.added = q.added[:added] // it was counted when first queued
+		q.started = append(q.started, hash)
+	}
+	q.queue = left
+	return waiting, nil
+}
+
+func TestQueuedLinksAreStartedAsSlotsFree(t *testing.T) {
+	f := newFakeService(t)
+	for _, hash := range []string{hashA, hashB, hashC} {
+		f.has(hash, false, map[string]string{hash[:1] + "/file.mp3": hash[:3]})
+		f.readyAfter[hash] = 2
+	}
+	q := &queueingService{fakeService: f, limit: 1}
+	opts := testOptions(t)
+	opts.Wait, opts.Poll = time.Hour, time.Minute
+	var log []string
+	opts.Log = func(format string, args ...any) { log = append(log, fmt.Sprintf(format, args...)) }
+
+	results, err := Download(q, []Magnet{magnetFor(hashA), magnetFor(hashB), magnetFor(hashC)}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, r := range results {
+		if r.Status != DownloadDone {
+			t.Errorf("link %d: %+v", i, r)
+		}
+	}
+	if strings.Join(q.started, ",") != hashB+","+hashC || len(q.queue) != 0 {
+		t.Errorf("queued links should be started in order as room appears: started %v, still queued %v", q.started, q.queue)
+	}
+	if !strings.Contains(strings.Join(log, "\n"), "1 being fetched, 0 stalled, 2 queued") {
+		t.Errorf("the wait line should say what is holding things up:\n%s", strings.Join(log, "\n"))
+	}
+}
+
+func TestStalledAndQueuedLinksAreReportedAsSuch(t *testing.T) {
+	f := newFakeService(t)
+	f.has(hashA, false, map[string]string{"A/a.mp3": "aaa"})
+	f.has(hashB, false, map[string]string{"B/b.mp3": "bbb"})
+	f.readyAfter[hashA] = -1
+	q := &queueingService{fakeService: f, limit: 1}
+	opts := testOptions(t)
+	opts.Wait, opts.Poll = 5*time.Minute, time.Minute
+
+	// The first link gets the only slot and then stalls, so the second can never start.
+	if err := q.Add(magnetFor(hashA).URI); err != nil {
+		t.Fatal(err)
+	}
+	f.items[hashA].Stalled, f.items[hashA].State = true, "stalled (no seeds)"
+	f.added = nil
+
+	results, err := Download(q, []Magnet{magnetFor(hashA), magnetFor(hashB)}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Status != DownloadStalled || !strings.Contains(results[0].Note, "stalled (no seeds)") || !strings.Contains(results[0].Note, "active slots") {
+		t.Errorf("stalled link: %+v", results[0])
+	}
+	if results[1].Status != DownloadNotReady || !strings.Contains(results[1].Note, "queued on Fake") {
+		t.Errorf("queued link: %+v", results[1])
+	}
+}

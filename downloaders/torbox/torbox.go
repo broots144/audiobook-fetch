@@ -30,6 +30,10 @@ func init() {
 	})
 }
 
+// errActiveLimit is TorBox saying the account is already fetching as many
+// links as its plan allows.
+var errActiveLimit = errors.New("the account's active download limit is reached")
+
 // BaseURL is the v1 API root.
 const BaseURL = "https://api.torbox.app/v1/api"
 
@@ -135,6 +139,10 @@ func (c *Client) callOnce(method, target string, body []byte, contentType string
 		if code, ok := env.Error.(string); ok && code != "" {
 			reason = code + ": " + reason
 		}
+		if strings.Contains(reason, "active download limit") {
+			// Not a fault and not worth retrying: the account is simply full.
+			return 0, false, errActiveLimit
+		}
 		return wait, retryable(resp.StatusCode), fmt.Errorf("HTTP %d: %s", resp.StatusCode, reason)
 	}
 	if out != nil && len(env.Data) > 0 && string(env.Data) != "null" {
@@ -171,6 +179,7 @@ func (t torrent) item() fetch.Item {
 		Name:     t.Name,
 		Ready:    t.DownloadFinished && t.DownloadPresent,
 		State:    t.DownloadState,
+		Stalled:  strings.HasPrefix(strings.ToLower(t.DownloadState), "stalled"),
 		Progress: t.Progress,
 	}
 	for _, f := range t.Files {
@@ -227,6 +236,44 @@ func (c *Client) Add(magnet string) error {
 	_ = writer.WriteField("magnet", magnet)
 	_ = writer.Close()
 	return c.call(http.MethodPost, "/torrents/createtorrent", nil, form.Bytes(), writer.FormDataContentType(), nil)
+}
+
+// AdvanceQueue implements fetch.Queuer. TorBox holds links beyond the plan's
+// active limit in a queue, and that queue can sit still even when slots are
+// free, so each of ours is started explicitly until TorBox says it is full.
+func (c *Client) AdvanceQueue(hashes []string) ([]string, error) {
+	var queue []struct {
+		ID   int64  `json:"id"`
+		Hash string `json:"hash"`
+	}
+	if err := c.call(http.MethodGet, "/queued/getqueued", url.Values{"type": {"torrent"}}, nil, "", &queue); err != nil {
+		return nil, err
+	}
+	wanted := make(map[string]bool, len(hashes))
+	for _, hash := range hashes {
+		wanted[strings.ToLower(hash)] = true
+	}
+	var waiting []string
+	full := false
+	for _, entry := range queue {
+		hash := strings.ToLower(entry.Hash)
+		if !wanted[hash] {
+			continue
+		}
+		if !full {
+			body, _ := json.Marshal(map[string]any{"queued_id": entry.ID, "operation": "start"})
+			err := c.call(http.MethodPost, "/queued/controlqueued", nil, body, "application/json", nil)
+			if err == nil {
+				continue // started: it will show up in List
+			}
+			if !errors.Is(err, errActiveLimit) {
+				return nil, err
+			}
+			full = true
+		}
+		waiting = append(waiting, hash)
+	}
+	return waiting, nil
 }
 
 // Link implements fetch.Downloader.

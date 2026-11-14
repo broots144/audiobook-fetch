@@ -21,6 +21,7 @@ type Item struct {
 	Name     string
 	Ready    bool    // the service has every file and can serve them now
 	State    string  // the service's own word for what it is doing
+	Stalled  bool    // the service cannot make progress on it (no seeds, say)
 	Progress float64 // 0 to 1 while the service is still fetching
 	Files    []File
 }
@@ -42,6 +43,15 @@ type Downloader interface {
 	Link(item Item, file File) (string, error)
 	// Remove deletes an item from the account.
 	Remove(item Item) error
+}
+
+// Queuer is implemented by downloaders whose accounts can only fetch a few
+// links at once and hold the rest in a queue. Such a queue does not
+// necessarily move by itself, so Download nudges it on every check.
+type Queuer interface {
+	// AdvanceQueue starts as many of the given links as the account has
+	// room for, and returns the hashes that are still waiting.
+	AdvanceQueue(hashes []string) (waiting []string, err error)
 }
 
 // DownloaderFactory creates a downloader from an account's API key.

@@ -25,6 +25,7 @@ const (
 	DownloadDone      = "downloaded"
 	DownloadNotCached = "skipped_not_cached"
 	DownloadNotReady  = "not_ready"
+	DownloadStalled   = "stalled"
 	DownloadFailed    = "failed"
 
 	partSuffix         = ".part"
@@ -196,23 +197,63 @@ func Download(service Downloader, magnets []Magnet, opts DownloadOptions) ([]Dow
 		if len(pending) == 0 {
 			break
 		}
+
+		// Finished items have just been collected (and perhaps removed), so
+		// this is the moment the account has room to start queued links.
+		queued := map[string]bool{}
+		if queuer, ok := service.(Queuer); ok {
+			var hashes []string
+			for i, m := range magnets {
+				if pending[i] {
+					hashes = append(hashes, m.Hash)
+				}
+			}
+			waiting, err := queuer.AdvanceQueue(hashes)
+			if err != nil {
+				opts.Log("could not check %s's queue: %v", name, err)
+			}
+			for _, hash := range waiting {
+				queued[hash] = true
+			}
+		}
+		fetching, stalled := 0, 0
+		for i, m := range magnets {
+			if item, ok := present[m.Hash]; pending[i] && ok && !queued[m.Hash] {
+				if item.Stalled {
+					stalled++
+				} else {
+					fetching++
+				}
+			}
+		}
+
 		if !opts.now().Before(deadline) {
 			for i, m := range magnets {
 				if !pending[i] {
 					continue
 				}
+				item, held := present[m.Hash]
 				results[i].Status = DownloadNotReady
-				results[i].Note = name + " has not finished fetching it; run again later"
-				if item, ok := present[m.Hash]; ok {
-					results[i].Name = item.Name
+				results[i].Name = item.Name
+				switch {
+				case queued[m.Hash]:
+					results[i].Note = fmt.Sprintf("queued on %s behind the account's limit on active links; run again later", name)
+				case held && item.Stalled:
+					results[i].Status = DownloadStalled
+					results[i].Note = fmt.Sprintf("%s cannot fetch it (%s) and it is holding one of the account's active slots; "+
+						"remove it there to let queued links start", name, item.State)
+				case held:
 					results[i].Note = fmt.Sprintf("%s is still fetching it (%s, %.0f%%); run again later",
 						name, item.State, item.Progress*100)
+				default:
+					results[i].Note = name + " has not started on it; run again later"
 				}
-				opts.Log("[%d/%d] %s  not ready: %s", i+1, len(magnets), short(m.Hash), results[i].Note)
+				opts.Log("[%d/%d] %s  %s: %s", i+1, len(magnets), short(m.Hash), strings.ReplaceAll(results[i].Status, "_", " "), results[i].Note)
 			}
 			break
 		}
-		opts.Log("waiting on %s for %d item(s)...", name, len(pending))
+		opts.Log("waiting on %s for %d item(s): %d being fetched, %d stalled, %d queued",
+			name, len(pending), fetching, stalled, len(queued))
 		opts.sleep(opts.Poll)
 	}
 	return results, nil
