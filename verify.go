@@ -335,6 +335,20 @@ func (f format) describe() string {
 	return fmt.Sprintf("%s (%d file%s, %d kbps)", strings.TrimPrefix(f.ext, "."), len(f.files), plural, f.kbps())
 }
 
+// A bitrate at the end of a file's name ("chapter_01_64kb.mp3") marks a
+// second encoding kept beside the original, as the Internet Archive does.
+var bitrateInName = regexp.MustCompile(`(?i)[ _.-](\d{2,3}) ?k(?:b|bps)?$`)
+
+// formatOf names the format a file belongs to: its extension, and the
+// bitrate its name ends in if it has one (".mp3", ".mp3 64k").
+func formatOf(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	if m := bitrateInName.FindStringSubmatch(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))); m != nil {
+		return ext + " " + m[1] + "k"
+	}
+	return ext
+}
+
 // oneFormat splits a book's files into the format to keep and the files of
 // other formats that merely repeat it.
 //
@@ -350,7 +364,7 @@ func oneFormat(playable []probed) (keep, duplicates []probed, note string) {
 	byExt := map[string]*format{}
 	var formats []*format
 	for _, f := range playable {
-		ext := strings.ToLower(filepath.Ext(f.path))
+		ext := formatOf(f.path)
 		group := byExt[ext]
 		if group == nil {
 			group = &format{ext: ext, codec: f.codec}
@@ -388,7 +402,7 @@ func oneFormat(playable []probed) (keep, duplicates []probed, note string) {
 		if f.quality() >= best*asGoodAs {
 			worse = 0
 		}
-		if f.ext == ".m4b" && len(f.files) == 1 {
+		if f.ext == ".m4b" && len(f.files) == 1 { // one file with chapters
 			notM4B = 0
 		}
 		return worse, notM4B, len(f.files), f.bits
@@ -416,7 +430,7 @@ func oneFormat(playable []probed) (keep, duplicates []probed, note string) {
 		others = append(others, f.describe())
 	}
 	for _, f := range playable {
-		if dropped[strings.ToLower(filepath.Ext(f.path))] {
+		if dropped[formatOf(f.path)] {
 			duplicates = append(duplicates, f)
 		} else {
 			keep = append(keep, f)

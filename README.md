@@ -23,33 +23,64 @@ audiobook-fetch books.txt /path/to/folder
 > liability for how the tool is used (see [LICENSE](LICENSE)). It is not
 > affiliated with any site or service it can search or download through.
 
+**Free to try, no account.** Public-domain books are found in the
+[Internet Archive](https://archive.org/details/librivoxaudio)'s LibriVox
+collection and downloaded straight from it. Everything else it can search
+needs a [TorBox](https://torbox.app) account to download through; `find`,
+`check` and `tidy` never need one.
+
 **Built from plugins.** Where it searches (a *source*) and what fetches the
-links (a *downloader*) are both small plugins behind a Go interface. Three
-sources and one downloader ship with it, you choose between them with
-`-source` and `-downloader`, and adding your own is one package: see
-[Extending](#extending).
+links (a *downloader*) are both small plugins behind a Go interface. Four
+sources and two downloaders ship with it, and adding your own is one
+package: see [Extending](#extending).
+
+## What a run looks like
+
+A public-domain book, on a machine with no account and no config:
+
+```console
+$ echo "The Raven | Edgar Allan Poe" > books.txt
+$ audiobook-fetch books.txt ~/audiobooks
+[1/1] ✓ 1.00  The Raven | Edgar Allan Poe
+        → The Raven - Edgar Allan Poe  (Unabridged, MP3, 47.3 MB)
+
+1 of 1 books looked up: 1 matched, 0 low confidence, 0 not found, 0 errors  (1s)
+
+downloading 1 item(s) to /home/you/audiobooks
+[1/1] 5f263ff1  downloaded: 4 files, 13.3 MB  The Raven - Edgar Allan Poe
+        check: ok | 2 audio files, 0.3 h, 97 kbps aac | spoken language en
+
+1 links: 1 downloaded, 0 no seeds, 0 not ready yet, 0 stalled, 0 skipped (not cached), 0 failed
+```
+
+The score (0 to 1) is how sure the match is; the `check:` line is what
+listening to the files found.
 
 ## Quick start
 
-1. **Build it** (Go 1.27 or newer):
+1. **Install it.**
+
+   ```sh
+   brew install broots144/tap/audiobook-fetch
+   ```
+
+   Or download a binary for macOS, Linux or Windows from the
+   [releases page](https://github.com/broots144/audiobook-fetch/releases)
+   (each release has checksums and build provenance), or build it with
+   Go 1.27 or newer:
 
    ```sh
    go install github.com/broots144/audiobook-fetch/cmd/audiobook-fetch@latest
    ```
 
-2. **Give it a downloader key.** Downloads go through
-   [TorBox](https://torbox.app), so you need an account there. Put its API
-   key in `~/.config/audiobook-fetch/torbox.key` and `chmod 600` it, or set
-   `TORBOX_API_KEY`.
-
-3. **Write a list**, one book per line (see [`books.example.txt`](books.example.txt)):
+2. **Write a list**, one book per line (see [`books.example.txt`](books.example.txt)):
 
    ```
    Pride and Prejudice | Jane Austen
    Frankenstein | Mary Shelley
    ```
 
-4. **Run it:**
+3. **Run it:**
 
    ```sh
    audiobook-fetch books.txt /path/to/folder
@@ -59,9 +90,18 @@ sources and one downloader ship with it, you choose between them with
    `/path/to/folder/.audiobook-fetch/results.csv` for you to look at. Running
    the same command again is always safe: it picks up where it stopped.
 
+4. **For books that are not in the Internet Archive**, add a downloader key.
+   Those go through [TorBox](https://torbox.app), so you need an account
+   there. Put its API key in `~/.config/audiobook-fetch/torbox.key` and
+   `chmod 600` it, or set `TORBOX_API_KEY`.
+
+**Is it set up right?** `audiobook-fetch doctor` checks the key, the folder
+and the optional programs, and says how to fix whatever is missing.
+
 **Optional, recommended:** install `ffmpeg` and `whisper-cpp` (both are in
 Homebrew and most package managers) and put a whisper.cpp model such as
-`ggml-base.bin` in `~/.config/audiobook-fetch/models/`. Each download's
+[`ggml-base.bin`](https://huggingface.co/ggerganov/whisper.cpp/tree/main)
+(about 150 MB) in `~/.config/audiobook-fetch/models/`. Each download's
 audio is then [checked](#checking-what-came-down): playable, spoken language,
 abridged or dramatized. Zip archives are unpacked without anything extra; for
 rar and 7z, install one of `7zz`, `7z`, `unar` or `bsdtar` (macOS has
@@ -73,9 +113,9 @@ rar and 7z, install one of `7zz`, `7z`, `unar` or `bsdtar` (macOS has
 - [What happens](#what-happens) and [how it picks](#how-it-picks)
 - [Options](#options) and the [config file](#config-file)
 - [Behaviour in detail](#behaviour-in-detail): queues, dead links, archives, the audio check, duplicate formats, sources
-- [The parts on their own](#the-parts-on-their-own): `find`, `download`, `check`, `tidy`
+- [The parts on their own](#the-parts-on-their-own): `find`, `download`, `check`, `tidy`, `doctor`
 - [Extending](#extending): the source and downloader plugins, and [use from Go](#use-from-go)
-- [Contributing](CONTRIBUTING.md), [security](SECURITY.md), [license](#license)
+- [Contributing](CONTRIBUTING.md), [security](SECURITY.md), [changelog](CHANGELOG.md), [license](#license)
 
 ## The list
 
@@ -145,7 +185,7 @@ A pick scoring 0.75 or more counts as a match (`-min-score`).
 | `-cached-only` | off | skip links the downloader would have to fetch first |
 | `-include-low` | off | also accept low-confidence matches |
 | `-lang NAME` | `english` | wanted language, or `any` |
-| `-source NAMES` | `audiobookbay,knaben` | where to search, comma-separated, in the order to try |
+| `-source NAMES` | `archive,audiobookbay,knaben` | where to search, comma-separated, in the order to try |
 | `-downloader NAME` | `torbox` | which service fetches the links |
 | `-delay D` | `3s` | pause between requests to a source |
 | `-search-proxy URL` | none | send searches through a proxy |
@@ -169,7 +209,7 @@ To avoid typing the folder and options every time, create
 {
   "to": "/path/to/audiobooks",
   "remove_after": true,
-  "sources": ["audiobookbay", "knaben"],
+  "sources": ["archive", "audiobookbay", "knaben"],
   "downloader": "torbox",
   "search_proxy": "",
   "check": true,
@@ -284,9 +324,22 @@ listing across all of them wins.
 
 | Name | What it is |
 |------|------------|
+| `archive` | The Internet Archive's LibriVox collection: public-domain books read by volunteers, free to download |
 | `audiobookbay` | AudioBook Bay: audiobooks only, with author, edition, format and bitrate on each listing |
 | `knaben` | Knaben: one API over The Pirate Bay and other public trackers |
 | `piratebay` | The Pirate Bay directly; Knaben already covers it, so this is for when Knaben is down |
+
+**Downloaders.** A link is sent to the downloader that can fetch it:
+
+| Name | What it is |
+|------|------------|
+| `archive` | fetches Internet Archive items straight from archive.org over HTTPS; no account, and only the original audio and the cover are taken, not the re-encoded copies the Archive keeps beside them |
+| `torbox` | [TorBox](https://torbox.app), for every other link; needs an account and its API key |
+
+The Archive's links always go to `archive` whichever downloader is chosen,
+because a torrent service makes no headway with them. So a list can mix
+both kinds of book, and with no TorBox key the public-domain ones still
+arrive while the rest are reported as needing a key.
 
 The general trackers list a release name and little else, so edition, format,
 bitrate and language are read from the name where it says. They do report how
@@ -304,6 +357,8 @@ audiobook-fetch find books.txt                  # only find links; writes result
 audiobook-fetch download magnets.txt /folder    # only download links you already have
 audiobook-fetch check /folder                   # only check books already downloaded
 audiobook-fetch tidy /folder                    # unpack archives and drop duplicate formats there
+audiobook-fetch doctor                          # check the setup and say what is missing
+audiobook-fetch version
 ```
 
 `find` writes `magnets.txt` (one link per confident match), `results.csv` and
@@ -317,6 +372,11 @@ moves and deletes nothing, and exits non-zero if it would reject any.
 with the others moved to the folder's `.audiobook-fetch/duplicates/`. Try it
 with `-dry-run` first to see what it would do, and use `-book NAME` to tidy
 only the folders whose name contains NAME.
+
+**Exit codes.** `0`: done. `1`: something needs attention (a download
+failed, searching stopped early, `check` would reject a book, `doctor` found
+something missing, or there was nothing to do). `2`: the command line was
+wrong.
 
 ## Extending
 
@@ -360,7 +420,8 @@ type Downloader interface {
 }
 ```
 
-`downloaders/torbox` is the model. Its API key is read from
+`downloaders/torbox` is the model for a service with an account, and
+`downloaders/archive` for one that serves files directly. An API key is read from
 `<NAME>_API_KEY` or `~/.config/audiobook-fetch/<name>.key`.
 
 Either one registers itself from `init` with `fetch.RegisterSource` or
@@ -377,14 +438,17 @@ testing one.
 
 ## Use from Go
 
+The package is usable as a library, but it is pre-1.0: names and signatures
+may still change between minor versions.
+
 ```go
 import (
     fetch "github.com/broots144/audiobook-fetch"
     _ "github.com/broots144/audiobook-fetch/downloaders/torbox"
-    _ "github.com/broots144/audiobook-fetch/sources/audiobookbay"
+    _ "github.com/broots144/audiobook-fetch/sources/archive"
 )
 
-source, _ := fetch.NewSource("audiobookbay", fetch.SourceConfig{Delay: 3 * time.Second})
+source, _ := fetch.NewSource("archive", fetch.SourceConfig{Delay: 3 * time.Second})
 books, links := fetch.ParseList("Frankenstein | Mary Shelley")
 result := fetch.Find(books[0], []fetch.Source{source}, fetch.DefaultOptions())
 if result.Status == fetch.StatusMatched {

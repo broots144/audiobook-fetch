@@ -85,7 +85,7 @@ audio check); a plugin only has to speak to its own service.
 | Kind | Interface | Lives in | Copy from |
 |------|-----------|----------|-----------|
 | Source: somewhere to search | `Source` in `source.go` (3 methods) | `sources/<name>/` | `sources/audiobookbay` for a site read page by page, `sources/knaben` for a JSON API |
-| Downloader: turns a magnet link into files | `Downloader` in `downloader.go` (6 methods) | `downloaders/<name>/` | `downloaders/torbox` |
+| Downloader: turns a magnet link into files | `Downloader` in `downloader.go` (6 methods) | `downloaders/<name>/` | `downloaders/torbox` for a service with an account, `downloaders/archive` for one that serves files directly |
 
 The steps are the same for both:
 
@@ -117,6 +117,19 @@ at the pleasure of the site it reads.
 
 A new plugin must be for a service that has lawful uses, and must not get
 around a login, a paywall or other access control.
+
+## Releasing
+
+Maintainers only. Add the release's entry to `CHANGELOG.md`, merge it, then
+tag the merged commit and push the tag:
+
+```sh
+git tag v1.2.3 && git push origin v1.2.3
+```
+
+The release workflow tests, builds the binaries for macOS, Linux and
+Windows, publishes them with checksums and build provenance, and updates
+the Homebrew formula in `broots144/homebrew-tap`.
 
 ## License
 

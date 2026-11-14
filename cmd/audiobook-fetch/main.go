@@ -17,13 +17,16 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 
 	fetch "github.com/broots144/audiobook-fetch"
 
 	// Sources and downloaders register themselves when imported. To add
-	// one, write its package and import it here.
+	// one, write its package and import it here. (The Archive's downloader
+	// is imported by download.go, which routes links to it.)
 	_ "github.com/broots144/audiobook-fetch/downloaders/torbox"
+	_ "github.com/broots144/audiobook-fetch/sources/archive"
 	_ "github.com/broots144/audiobook-fetch/sources/audiobookbay"
 	_ "github.com/broots144/audiobook-fetch/sources/knaben"
 	_ "github.com/broots144/audiobook-fetch/sources/piratebay"
@@ -33,17 +36,36 @@ const (
 	defaultDownloader = "torbox"
 )
 
-// defaultSources are searched in this order: the audiobook site first, the
-// general trackers only for what it could not match confidently.
-var defaultSources = []string{"audiobookbay", "knaben"}
+// defaultSources are searched in this order: the Internet Archive's free,
+// public-domain recordings first, then the audiobook site, and the general
+// trackers only for what neither could match confidently.
+var defaultSources = []string{"archive", "audiobookbay", "knaben"}
+
+// version is set when a release is built; see versionString.
+var version = ""
+
+// versionString is the release this binary was built from, or, for one
+// built with "go install" or "go build", what the Go toolchain recorded.
+func versionString() string {
+	if version != "" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
+		return info.Main.Version
+	}
+	return "(devel)"
+}
 
 func main() {
 	args := os.Args[1:]
 	command := "get"
 	if len(args) > 0 {
 		switch args[0] {
-		case "get", "find", "download", "check", "tidy":
+		case "get", "find", "download", "check", "tidy", "doctor":
 			command, args = args[0], args[1:]
+		case "version", "-v", "-version", "--version":
+			fmt.Printf("%s %s\n", fetch.AppName, versionString())
+			return
 		case "help", "-h", "-help", "--help":
 			usage(os.Stdout)
 			return
@@ -59,6 +81,10 @@ func main() {
 		cmdCheck(args, cfg)
 	case "tidy":
 		cmdTidy(args, cfg)
+	case "doctor":
+		if !cmdDoctor(args, cfg, os.Stdout) {
+			os.Exit(1)
+		}
 	default:
 		cmdGet(args, cfg)
 	}
@@ -72,6 +98,8 @@ func usage(w io.Writer) {
   %[1]s download LINKS [FOLDER]  only download magnet links you already have
   %[1]s check [FOLDER]           check the audio of books already downloaded
   %[1]s tidy [FOLDER]            unpack archives and drop duplicate formats there
+  %[1]s doctor                   check the setup: key, folder, optional tools
+  %[1]s version                  print the version
 
 LIST is a text file with one book per line, for example:
 
