@@ -1,0 +1,8 @@
+# One book per line:  Title | Author
+# The author is optional but makes matches much more reliable.
+# Lines starting with # are ignored.
+
+Pride and Prejudice | Jane Austen
+Frankenstein | Mary Shelley
+Moby Dick | Herman Melville
+Dracula
