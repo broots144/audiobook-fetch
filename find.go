@@ -40,7 +40,8 @@ type RunnerUp struct {
 	Heading string  `json:"heading"`
 }
 
-// Alternate is another listing of the same book that also passed as a match:
+// Alternate is another listing of the same book that also passed as a match,
+// with no penalty against it (so never an abridged or dramatized edition):
 // the one to turn to when the chosen listing cannot be downloaded.
 type Alternate struct {
 	Score     float64    `json:"score"`
@@ -256,10 +257,13 @@ func find(w Wanted, sources []Source, opts Options) (Result, error) {
 	winner := finalists[0]
 
 	// Other listings that are just as surely this book, kept as fallbacks.
+	// A fallback is used without anyone looking, so it must be a clean
+	// match: nothing abridged, dramatized, bundled or otherwise penalised,
+	// even where such a listing would still clear MinScore.
 	var alternates []Alternate
 	offered := map[string]bool{winner.cand.InfoHash: true}
 	for _, f := range finalists[1:] {
-		if f.score.Total < opts.MinScore || offered[f.cand.InfoHash] {
+		if f.score.Total < opts.MinScore || f.score.Penalty > 0 || offered[f.cand.InfoHash] {
 			continue
 		}
 		offered[f.cand.InfoHash] = true

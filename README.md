@@ -132,8 +132,9 @@ one of those slots while it sits there. Once the downloader has made no
 progress on a link for `-stall-after`, the tool gives up on it, reports it as
 *no seeds*, and removes it from the downloader (if this tool added it) so the
 next link can start. When the link came from a search, the tool then tries
-the book's next-best listing, as long as that one also counts as a match, and
-keeps going until one downloads or none are left. Those fallbacks are noted
+the book's next-best listing, as long as that one also counts as a match and
+has nothing against it (an abridged or dramatized edition is never used as a
+fallback), and keeps going until one downloads or none are left. Those fallbacks are noted
 during the search, so trying them needs no further searching.
 
 **A source refusing you?** Sources limit how fast one address may search.
