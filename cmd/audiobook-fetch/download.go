@@ -25,6 +25,7 @@ func (d *downloadFlags) register(flags *flag.FlagSet, cfg config) {
 	flags.StringVar(&d.opts.Dest, "to", d.opts.Dest, "folder to download into (same as naming it after the list)")
 	flags.StringVar(&d.name, "downloader", cfg.Downloader, "service that fetches the links ("+strings.Join(fetch.DownloaderNames(), ", ")+")")
 	flags.BoolVar(&d.opts.RemoveAfter, "remove-after", cfg.RemoveAfter, "remove each item from the service once its files are here (only items this tool added; anything already in your account is left alone)")
+	flags.BoolVar(&d.opts.Redo, "redo", false, "download links again even if an earlier run already completed them")
 	flags.BoolVar(&d.opts.CachedOnly, "cached-only", false, "skip links the service would have to fetch first")
 	flags.IntVar(&d.opts.Parallel, "parallel", d.opts.Parallel, "files to download at once")
 	flags.DurationVar(&d.opts.Wait, "wait", d.opts.Wait, "how long to wait for the service to fetch links it does not have yet")

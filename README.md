@@ -116,11 +116,18 @@ A pick scoring 0.75 or more counts as a match (`-min-score`).
 | `-wait D` | `1h` | how long to wait for the downloader to fetch what it lacks |
 | `-parallel N` | `3` | files to download at once |
 | `-fresh` | off | search every book again, ignoring earlier matches |
+| `-redo` | off | download links again even if an earlier run completed them |
 | `-quiet` | off | only print the summaries |
 
 **`-remove-after`** only ever removes items this tool added, and only once
 every file of the item is on disk. Anything that was already in your account
 is left alone, even if it matches a link in the list.
+
+**Queues and stalled links.** Some accounts may only fetch a few links at
+once and queue the rest. The tool starts queued links itself as slots free
+up. A link the service cannot fetch (no seeds) is reported as *stalled*: it
+holds a slot for as long as it stays, so remove it there if others are
+waiting behind it.
 
 **A source refusing you?** Sources limit how fast one address may search.
 The tool stops after three failures in a row instead of grinding on; wait and

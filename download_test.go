@@ -467,17 +467,28 @@ func (q *queueingService) active() int {
 }
 
 func (q *queueingService) Add(magnet string) error {
+	hash := NormalizeHash(btih.FindStringSubmatch(magnet)[1])
 	q.mu.Lock()
-	full := q.active() >= q.limit
+	// A cached link is ready at once and takes no slot; only links the
+	// service has to fetch count against the limit.
+	full := !q.cached[hash] && q.active() >= q.limit
 	if full {
 		q.queue = append(q.queue, magnet)
-		q.added = append(q.added, NormalizeHash(btih.FindStringSubmatch(magnet)[1]))
+		q.added = append(q.added, hash)
 	}
 	q.mu.Unlock()
 	if full {
 		return nil
 	}
 	return q.fakeService.Add(magnet)
+}
+
+func (q *queueingService) Queued() ([]string, error) {
+	var hashes []string
+	for _, magnet := range q.queue {
+		hashes = append(hashes, NormalizeHash(btih.FindStringSubmatch(magnet)[1]))
+	}
+	return hashes, nil
 }
 
 func (q *queueingService) AdvanceQueue(hashes []string) ([]string, error) {
@@ -561,5 +572,45 @@ func TestStalledAndQueuedLinksAreReportedAsSuch(t *testing.T) {
 	}
 	if results[1].Status != DownloadNotReady || !strings.Contains(results[1].Note, "queued on Fake") {
 		t.Errorf("queued link: %+v", results[1])
+	}
+}
+
+func TestALaterRunDoesNotHandFinishedOrQueuedLinksBackToTheService(t *testing.T) {
+	f := newFakeService(t)
+	f.has(hashA, true, map[string]string{"A/a.mp3": "aaa"})
+	f.has(hashB, false, map[string]string{"B/b.mp3": "bbb"})
+	f.has(hashC, false, map[string]string{"C/c.mp3": "ccc"})
+	f.readyAfter[hashB], f.readyAfter[hashC] = -1, -1
+	q := &queueingService{fakeService: f, limit: 1}
+	opts := testOptions(t)
+	opts.RemoveAfter, opts.Wait, opts.Poll = true, 2*time.Minute, time.Minute
+	magnets := []Magnet{magnetFor(hashA), magnetFor(hashB), magnetFor(hashC)}
+
+	// First run: A is downloaded and removed, B takes the only slot, C is queued.
+	if _, err := Download(q, magnets, opts); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.added) != 3 || len(q.queue) != 1 {
+		t.Fatalf("after the first run: added %v, queue %v", f.added, q.queue)
+	}
+
+	results, err := Download(q, magnets, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.added) != 3 {
+		t.Errorf("the second run must add nothing: finished and queued links are already accounted for; added %v", f.added)
+	}
+	if results[0].Status != DownloadDone || !strings.Contains(results[0].Note, "earlier run") || results[0].Fetched != 0 {
+		t.Errorf("finished link: %+v", results[0])
+	}
+	if results[2].Status != DownloadNotReady || !strings.Contains(results[2].Note, "queued") {
+		t.Errorf("queued link: %+v", results[2])
+	}
+
+	// Asking for it again does hand it back.
+	opts.Redo = true
+	if results, err = Download(q, magnets[:1], opts); err != nil || len(f.added) != 4 || results[0].Status != DownloadDone {
+		t.Errorf("with Redo: err %v, added %v, result %+v", err, f.added, results[0])
 	}
 }

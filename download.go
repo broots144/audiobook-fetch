@@ -38,6 +38,7 @@ type DownloadOptions struct {
 	Dest        string        // folder the files go into
 	CachedOnly  bool          // don't add links the service would have to fetch first
 	RemoveAfter bool          // remove an item from the service once all its files are here (only items this tool added)
+	Redo        bool          // fetch links again even if an earlier run already completed them
 	Parallel    int           // files downloaded at once
 	Wait        time.Duration // how long to wait for the service to finish fetching
 	Poll        time.Duration // how often to check on items the service is still fetching
@@ -71,21 +72,28 @@ type DownloadResult struct {
 // download folder: the record of what it added to the service, and its reports.
 func BookkeepingDir(dest string) string { return filepath.Join(dest, "."+AppName) }
 
-// state remembers which items this tool put on the service, so that removing
-// afterwards can never touch anything that was already in the account.
+// state is what the tool remembers between runs, per download folder.
 type state struct {
+	// Added is what this tool put on the service, so that removing afterwards
+	// can never touch anything that was already in the account.
 	Added map[string]bool `json:"added"`
-	path  string
+	// Done is what has been fully downloaded here, so that a later run does
+	// not hand the link to the service again just to find nothing to do.
+	Done map[string]bool `json:"done"`
+	path string
 }
 
 func loadState(dest string, service Downloader) *state {
 	name := strings.ToLower(strings.ReplaceAll(service.Name(), " ", "-")) + "-state.json"
-	s := &state{Added: map[string]bool{}, path: filepath.Join(BookkeepingDir(dest), name)}
+	s := &state{path: filepath.Join(BookkeepingDir(dest), name)}
 	if data, err := os.ReadFile(s.path); err == nil {
 		_ = json.Unmarshal(data, s)
 	}
 	if s.Added == nil {
 		s.Added = map[string]bool{}
+	}
+	if s.Done == nil {
+		s.Done = map[string]bool{}
 	}
 	return s
 }
@@ -142,13 +150,31 @@ func Download(service Downloader, magnets []Magnet, opts DownloadOptions) ([]Dow
 		}
 	}
 
+	// Links waiting in the service's queue are held already, though List
+	// does not show them; adding them again would only be refused.
+	inQueue := map[string]bool{}
+	if queuer, ok := service.(Queuer); ok && len(missing) > 0 {
+		waiting, err := queuer.Queued()
+		if err != nil {
+			return nil, err
+		}
+		for _, hash := range waiting {
+			inQueue[strings.ToLower(hash)] = true
+		}
+	}
+
 	results := make([]DownloadResult, len(magnets))
 	pending := map[int]bool{}
 	addedAny := false
 	for i, m := range magnets {
 		results[i] = DownloadResult{Hash: m.Hash}
-		if _, ok := present[m.Hash]; ok {
+		if _, ok := present[m.Hash]; ok || inQueue[m.Hash] {
 			pending[i] = true
+			continue
+		}
+		if st.Done[m.Hash] && !opts.Redo {
+			results[i].Status, results[i].Note = DownloadDone, "downloaded by an earlier run"
+			opts.Log("[%d/%d] %s  downloaded by an earlier run", i+1, len(magnets), short(m.Hash))
 			continue
 		}
 		if opts.CachedOnly && !cached[m.Hash] {
@@ -335,6 +361,10 @@ func fetchItem(service Downloader, item Item, st *state, opts DownloadOptions) D
 		return result
 	}
 	result.Status = DownloadDone
+	st.Done[hash] = true
+	if err := st.save(); err != nil {
+		result.Note = "downloaded, but could not update the state file: " + err.Error()
+	}
 
 	name := service.Name()
 	switch {

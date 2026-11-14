@@ -174,12 +174,14 @@ type torrentFile struct {
 
 func (t torrent) item() fetch.Item {
 	item := fetch.Item{
-		ID:       strconv.FormatInt(t.ID, 10),
-		Hash:     strings.ToLower(t.Hash),
-		Name:     t.Name,
-		Ready:    t.DownloadFinished && t.DownloadPresent,
-		State:    t.DownloadState,
-		Stalled:  strings.HasPrefix(strings.ToLower(t.DownloadState), "stalled"),
+		ID:    strconv.FormatInt(t.ID, 10),
+		Hash:  strings.ToLower(t.Hash),
+		Name:  t.Name,
+		Ready: t.DownloadFinished && t.DownloadPresent,
+		State: t.DownloadState,
+		// TorBox also says "stalled" of a link that has all its data and is
+		// only being finished off, so progress has to agree.
+		Stalled:  strings.HasPrefix(strings.ToLower(t.DownloadState), "stalled") && t.Progress < 1,
 		Progress: t.Progress,
 	}
 	for _, f := range t.Files {
@@ -238,15 +240,36 @@ func (c *Client) Add(magnet string) error {
 	return c.call(http.MethodPost, "/torrents/createtorrent", nil, form.Bytes(), writer.FormDataContentType(), nil)
 }
 
+type queuedTorrent struct {
+	ID   int64  `json:"id"`
+	Hash string `json:"hash"`
+}
+
+func (c *Client) queue() ([]queuedTorrent, error) {
+	var queue []queuedTorrent
+	err := c.call(http.MethodGet, "/queued/getqueued", url.Values{"type": {"torrent"}}, nil, "", &queue)
+	return queue, err
+}
+
+// Queued implements fetch.Queuer.
+func (c *Client) Queued() ([]string, error) {
+	queue, err := c.queue()
+	if err != nil {
+		return nil, err
+	}
+	hashes := make([]string, 0, len(queue))
+	for _, entry := range queue {
+		hashes = append(hashes, strings.ToLower(entry.Hash))
+	}
+	return hashes, nil
+}
+
 // AdvanceQueue implements fetch.Queuer. TorBox holds links beyond the plan's
 // active limit in a queue, and that queue can sit still even when slots are
 // free, so each of ours is started explicitly until TorBox says it is full.
 func (c *Client) AdvanceQueue(hashes []string) ([]string, error) {
-	var queue []struct {
-		ID   int64  `json:"id"`
-		Hash string `json:"hash"`
-	}
-	if err := c.call(http.MethodGet, "/queued/getqueued", url.Values{"type": {"torrent"}}, nil, "", &queue); err != nil {
+	queue, err := c.queue()
+	if err != nil {
 		return nil, err
 	}
 	wanted := make(map[string]bool, len(hashes))

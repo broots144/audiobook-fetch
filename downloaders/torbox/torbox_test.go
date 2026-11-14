@@ -309,10 +309,18 @@ func TestAdvanceQueueStartsOursUntilTheAccountIsFull(t *testing.T) {
 		t.Errorf("a full account must end the attempts at once, without retries: %d start calls, waits %v", f.startCalls, waits)
 	}
 
-	items := []map[string]any{{"id": 5, "hash": hashA, "download_state": "stalled (no seeds)"}, {"id": 6, "hash": hashB, "download_state": "downloading"}}
-	f.torrents = items
+	queued, err := queuer.Queued()
+	if err != nil || strings.Join(queued, ",") != other+","+hashB+","+hashC {
+		t.Errorf("queued = %v, err %v", queued, err)
+	}
+
+	f.torrents = []map[string]any{
+		{"id": 5, "hash": hashA, "download_state": "stalled (no seeds)", "progress": 0},
+		{"id": 6, "hash": hashB, "download_state": "downloading", "progress": 0.5},
+		{"id": 7, "hash": hashC, "download_state": "stalled (no seeds)", "progress": 1}, // has its data; being finished off
+	}
 	list, _ := c.List()
-	if !list[0].Stalled || list[1].Stalled {
-		t.Errorf("stalled flags: %v, %v", list[0].Stalled, list[1].Stalled)
+	if !list[0].Stalled || list[1].Stalled || list[2].Stalled {
+		t.Errorf("stalled flags: %v, %v, %v", list[0].Stalled, list[1].Stalled, list[2].Stalled)
 	}
 }

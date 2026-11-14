@@ -49,6 +49,9 @@ type Downloader interface {
 // links at once and hold the rest in a queue. Such a queue does not
 // necessarily move by itself, so Download nudges it on every check.
 type Queuer interface {
+	// Queued returns the hashes waiting in the queue. Queued links are not
+	// part of List, so this is the only way to know they are already held.
+	Queued() ([]string, error)
 	// AdvanceQueue starts as many of the given links as the account has
 	// room for, and returns the hashes that are still waiting.
 	AdvanceQueue(hashes []string) (waiting []string, err error)
