@@ -1,6 +1,8 @@
 package audiobookfetch
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,7 +23,8 @@ type Source interface {
 	// filled in as far as the results page allows. No results is not an error.
 	Search(query string, page int) ([]*Candidate, error)
 	// Details completes a candidate from its own page: authors, narrators,
-	// edition, trackers and, above all, the info hash.
+	// edition, trackers and, above all, the info hash. A source whose
+	// search results are already complete does nothing here.
 	Details(c *Candidate) error
 }
 
@@ -87,10 +90,22 @@ func NewFetcher(cfg SourceConfig) (*Fetcher, error) {
 }
 
 // Get returns the body of a page. A page that does not exist is "" with no error.
-func (f *Fetcher) Get(target string) (string, error) {
+func (f *Fetcher) Get(target string) (string, error) { return f.do(target, nil) }
+
+// PostJSON sends payload as JSON and returns the answer's body, for sources
+// that are searched through an API rather than a web page.
+func (f *Fetcher) PostJSON(target string, payload any) (string, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return f.do(target, data)
+}
+
+func (f *Fetcher) do(target string, payload []byte) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt <= f.Retries; attempt++ {
-		body, retry, err := f.getOnce(target)
+		body, retry, err := f.once(target, payload)
 		if err == nil {
 			return body, nil
 		}
@@ -105,18 +120,25 @@ func (f *Fetcher) Get(target string) (string, error) {
 	return "", fmt.Errorf("%s: %w", target, lastErr)
 }
 
-func (f *Fetcher) getOnce(target string) (body string, retry bool, err error) {
+func (f *Fetcher) once(target string, payload []byte) (body string, retry bool, err error) {
 	if wait := f.Delay - time.Since(f.last); wait > 0 {
 		time.Sleep(wait)
 	}
 	f.last = time.Now()
 
-	req, err := http.NewRequest(http.MethodGet, target, nil)
+	method, content := http.MethodGet, io.Reader(nil)
+	if payload != nil {
+		method, content = http.MethodPost, bytes.NewReader(payload)
+	}
+	req, err := http.NewRequest(method, target, content)
 	if err != nil {
 		return "", false, err
 	}
 	req.Header.Set("User-Agent", fetcherUserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := f.HTTP.Do(req)
 	if err != nil {
 		return "", true, err

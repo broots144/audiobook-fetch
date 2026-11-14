@@ -152,8 +152,11 @@ func Find(w Wanted, sources []Source, opts Options) Result {
 	return result
 }
 
+// skips counts listings that were found but could not be considered.
+type skips struct{ otherLanguage, unseeded int }
+
 // search gathers and scores candidates from one source into pool.
-func search(w Wanted, src Source, opts Options, seen map[string]bool, pool *[]scored, otherLanguage *int) (best float64, err error) {
+func search(w Wanted, src Source, opts Options, seen map[string]bool, pool *[]scored, skipped *skips) (best float64, err error) {
 	for _, query := range BuildQueries(w) {
 		for page := 1; page <= max(1, opts.Pages); page++ {
 			hits, err := src.Search(query, page)
@@ -167,7 +170,11 @@ func search(w Wanted, src Source, opts Options, seen map[string]bool, pool *[]sc
 				seen[c.URL] = true
 				c.Source = src.Name()
 				if wrongLanguage(c, opts.Language) {
-					*otherLanguage++
+					skipped.otherLanguage++
+					continue
+				}
+				if c.Unseeded() {
+					skipped.unseeded++ // nothing to download it from
 					continue
 				}
 				s := ScoreCandidate(w, c, opts.Language)
@@ -188,12 +195,12 @@ func search(w Wanted, src Source, opts Options, seen map[string]bool, pool *[]sc
 func find(w Wanted, sources []Source, opts Options) (Result, error) {
 	var pool []scored
 	seen := map[string]bool{}
-	otherLanguage := 0
+	var skipped skips
 
 	// One source failing is not fatal while another can still answer.
 	var lastErr error
 	for _, src := range sources {
-		best, err := search(w, src, opts, seen, &pool, &otherLanguage)
+		best, err := search(w, src, opts, seen, &pool, &skipped)
 		if err != nil {
 			lastErr = fmt.Errorf("%s: %w", src.Name(), err)
 			continue
@@ -207,8 +214,13 @@ func find(w Wanted, sources []Source, opts Options) (Result, error) {
 			return Result{}, lastErr
 		}
 		note := "no search results"
-		if otherLanguage > 0 {
-			note = fmt.Sprintf("only found in other languages (%d listings)", otherLanguage)
+		switch {
+		case skipped.otherLanguage > 0 && skipped.unseeded > 0:
+			note = fmt.Sprintf("only found in other languages (%d listings) or with no seeds (%d)", skipped.otherLanguage, skipped.unseeded)
+		case skipped.otherLanguage > 0:
+			note = fmt.Sprintf("only found in other languages (%d listings)", skipped.otherLanguage)
+		case skipped.unseeded > 0:
+			note = fmt.Sprintf("only found with no seeds (%d listings)", skipped.unseeded)
 		}
 		return Result{Wanted: w, Status: StatusNotFound, Note: note}, nil
 	}

@@ -464,3 +464,55 @@ func TestOtherTrustedListingsAreKeptAsFallbacks(t *testing.T) {
 		t.Error("with no alternate left, the result must stay as it is")
 	}
 }
+
+func TestParseRelease(t *testing.T) {
+	for name, want := range map[string]string{
+		"Mary Shelley - Frankenstein - Äänikirja (Finnish)": "Finnish",
+		"Frankenstein [Hörbuch] 64kbps":                     "German",
+		"Frankenstein - Mary Shelley (English, Unabridged)": "English",
+		"The French Lieutenant's Woman - John Fowles":       "", // a title word, not a tag
+		"The English Patient (Unabridged)":                  "",
+		"Frankenstein [MP3, German]":                        "German",
+		"Frankenstein - Mary Shelley":                       "",
+	} {
+		var c Candidate
+		if ParseRelease(name, &c); c.Language != want {
+			t.Errorf("%q: language %q, want %q", name, c.Language, want)
+		}
+	}
+	for _, tc := range []struct{ name, heading, edition, format, bitrate string }{
+		{"Mary Shelley - Frankenstein (Unabridged) [M4B 64kbps]", "Mary Shelley - Frankenstein", "Unabridged", "M4B", "64 Kbps"},
+		{"Frankenstein.by.Mary.Shelley.Audiobook.MP3", "Frankenstein by Mary Shelley", "", "MP3", ""},
+		{"Frankenstein (Abridged) - Mary Shelley", "Frankenstein (Abridged) - Mary Shelley", "Abridged", "", ""},
+		{"Dracula - Bram Stoker (BBC Radio Dramatization) 128k", "Dracula - Bram Stoker (BBC Radio Dramatization)", "", "", "128 Kbps"},
+		{"Dracula (1897) - Bram Stoker", "Dracula (1897) - Bram Stoker", "", "", ""},
+		{"MP3", "MP3", "", "MP3", ""},
+	} {
+		var c Candidate
+		ParseRelease(tc.name, &c)
+		if c.Heading != tc.heading || c.Edition != tc.edition || c.Format != tc.format || c.Bitrate != tc.bitrate {
+			t.Errorf("%q -> heading %q, edition %q, format %q, bitrate %q", tc.name, c.Heading, c.Edition, c.Format, c.Bitrate)
+		}
+	}
+}
+
+func TestListingsNobodyIsSeedingAreNotPicked(t *testing.T) {
+	zero, some := 0, 3
+	src := &fakeSource{
+		listings: map[string][]Candidate{"Dune Herbert": {
+			{Heading: "Dune - Frank Herbert", URL: "u/dead", InfoHash: "aaa", Format: "M4B", Bitrate: "128 Kbps", Seeders: &zero},
+			{Heading: "Dune - Frank Herbert", URL: "u/alive", InfoHash: "bbb", Seeders: &some},
+		}},
+		details: map[string]Candidate{"u/dead": {InfoHash: "aaa"}, "u/alive": {InfoHash: "bbb"}},
+	}
+	r := Find(Wanted{Title: "Dune", Author: "Frank Herbert"}, []Source{src}, DefaultOptions())
+	if r.Status != StatusMatched || r.Candidate.URL != "u/alive" || len(r.Alternates) != 0 {
+		t.Errorf("status %s, picked %+v, alternates %d", r.Status, r.Candidate, len(r.Alternates))
+	}
+
+	src.listings["Dune Herbert"] = src.listings["Dune Herbert"][:1]
+	r = Find(Wanted{Title: "Dune", Author: "Frank Herbert"}, []Source{src}, DefaultOptions())
+	if r.Status != StatusNotFound || !strings.Contains(r.Note, "no seeds (1 listings)") {
+		t.Errorf("only a dead listing: status %s, note %q", r.Status, r.Note)
+	}
+}

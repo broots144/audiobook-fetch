@@ -24,12 +24,17 @@ import (
 	// one, write its package and import it here.
 	_ "github.com/broots144/audiobook-fetch/downloaders/torbox"
 	_ "github.com/broots144/audiobook-fetch/sources/audiobookbay"
+	_ "github.com/broots144/audiobook-fetch/sources/knaben"
+	_ "github.com/broots144/audiobook-fetch/sources/piratebay"
 )
 
 const (
-	defaultSource     = "audiobookbay"
 	defaultDownloader = "torbox"
 )
+
+// defaultSources are searched in this order: the audiobook site first, the
+// general trackers only for what it could not match confidently.
+var defaultSources = []string{"audiobookbay", "knaben"}
 
 func main() {
 	args := os.Args[1:]
@@ -105,7 +110,7 @@ func configDir() string {
 }
 
 func loadConfig() config {
-	cfg := config{Sources: []string{defaultSource}, Downloader: defaultDownloader}
+	cfg := config{Sources: defaultSources, Downloader: defaultDownloader}
 	path := filepath.Join(configDir(), "config.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -115,7 +120,7 @@ func loadConfig() config {
 		fatal(fmt.Errorf("%s is not valid JSON: %w", path, err))
 	}
 	if len(cfg.Sources) == 0 {
-		cfg.Sources = []string{defaultSource}
+		cfg.Sources = defaultSources
 	}
 	if cfg.Downloader == "" {
 		cfg.Downloader = defaultDownloader
@@ -251,6 +256,7 @@ func cmdGet(args []string, cfg config) {
 	// Download, and for every book whose listing nobody is seeding, move to
 	// its next-best listing and go again until one works or none are left.
 	byHash := map[string]fetch.DownloadResult{}
+	searchedAgain := map[string]bool{}
 	for len(links) > 0 {
 		fmt.Fprintf(os.Stderr, "\ndownloading %d item(s) to %s\n", len(links), dest)
 		downloads, err := downloadLinks(links, &download, *quiet)
@@ -260,7 +266,7 @@ func cmdGet(args []string, cfg config) {
 		for _, d := range downloads {
 			byHash[d.Hash] = d
 		}
-		links = nextBestLinks(results, byHash, seen, search.includeLow)
+		links = nextBestLinks(results, byHash, seen, searchedAgain, &search)
 		if len(links) > 0 {
 			fmt.Fprintf(os.Stderr, "\n%d book(s) had a listing with no seeds; trying the next-best listing of each\n", len(links))
 		}
@@ -301,22 +307,48 @@ func cmdGet(args []string, cfg config) {
 // seeds on to its next-best listing, and returns the links to try now.
 // A listing already tried (tried holds every hash sent so far) is passed
 // over, so two books sharing a bundle do not send it twice.
-func nextBestLinks(results []fetch.Result, downloads map[string]fetch.DownloadResult, tried map[string]bool, includeLow bool) []fetch.Magnet {
+//
+// A book that runs out of listings is looked up once more (searchedAgain
+// remembers which), on the sources its dead listing did not come from.
+// Those were never asked if the first source looked certain, and a general
+// tracker knows which of its listings are seeded.
+func nextBestLinks(results []fetch.Result, downloads map[string]fetch.DownloadResult, tried, searchedAgain map[string]bool, s *searchFlags) []fetch.Magnet {
 	var links []fetch.Magnet
 	for i := range results {
 		r := &results[i]
-		if !actionable(*r, includeLow) || downloads[r.Candidate.InfoHash].Status != fetch.DownloadNoSeeds {
+		if !actionable(*r, s.includeLow) || downloads[r.Candidate.InfoHash].Status != fetch.DownloadNoSeeds {
 			continue
 		}
-		for r.NextBest("the first choice had no seeds") {
-			if hash := r.Candidate.InfoHash; !tried[hash] {
+		moved := false
+		for !moved && r.NextBest("the first choice had no seeds") {
+			hash := r.Candidate.InfoHash
+			if !tried[hash] {
 				tried[hash] = true
 				links = append(links, fetch.Magnet{Hash: hash, URI: r.Magnet})
-				break
-			} else if downloads[hash].Status != fetch.DownloadNoSeeds {
-				break // another book already brought this listing in
+			}
+			moved = downloads[hash].Status != fetch.DownloadNoSeeds
+		}
+		if moved || searchedAgain[r.Wanted.Raw] {
+			continue
+		}
+		searchedAgain[r.Wanted.Raw] = true
+		var others []fetch.Source
+		for _, source := range s.sources {
+			if source.Name() != r.Candidate.Source {
+				others = append(others, source)
 			}
 		}
+		if len(others) == 0 {
+			continue
+		}
+		again := fetch.Find(r.Wanted, others, s.opts)
+		if !actionable(again, s.includeLow) || tried[again.Candidate.InfoHash] {
+			continue
+		}
+		again.Note = strings.TrimSuffix("found elsewhere: every listing on "+r.Candidate.Source+" had no seeds; "+again.Note, "; ")
+		*r = again
+		tried[again.Candidate.InfoHash] = true
+		links = append(links, fetch.Magnet{Hash: again.Candidate.InfoHash, URI: again.Magnet})
 	}
 	return links
 }

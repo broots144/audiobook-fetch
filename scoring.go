@@ -87,7 +87,13 @@ type Candidate struct {
 	Edition   string   `json:"edition"` // "Unabridged", "Abridged", "Dramatization"...
 	InfoHash  string   `json:"info_hash"`
 	Trackers  []string `json:"trackers"`
+	// Seeders is how many peers hold the whole thing, where the source
+	// says; nil where it does not. Zero means nobody can be fetched from.
+	Seeders *int `json:"seeders,omitempty"`
 }
+
+// Unseeded reports that the source knows nobody is seeding the listing.
+func (c *Candidate) Unseeded() bool { return c.Seeders != nil && *c.Seeders <= 0 }
 
 // Score is the verdict on one candidate, with the parts that produced it.
 type Score struct {

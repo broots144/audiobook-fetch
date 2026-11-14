@@ -8,7 +8,10 @@ audiobook-fetch books.txt /path/to/folder
 ```
 
 Searching and downloading are both pluggable. Today it searches
-[AudioBook Bay](https://audiobookbay.lu) and downloads through
+[AudioBook Bay](https://audiobookbay.lu) first, falls back to
+[Knaben](https://knaben.org) (a search engine over The Pirate Bay and other
+public trackers) for books it cannot match confidently there, and downloads
+through
 [TorBox](https://torbox.app), so a TorBox account is needed for the download
 half. More of either can be added (see [Extending](#extending)).
 
@@ -32,7 +35,7 @@ Put your TorBox API key in `~/.config/audiobook-fetch/torbox.key`, or set
 {
   "to": "/path/to/audiobooks",
   "remove_after": true,
-  "sources": ["audiobookbay"],
+  "sources": ["audiobookbay", "knaben"],
   "downloader": "torbox",
   "search_proxy": ""
 }
@@ -109,7 +112,7 @@ A pick scoring 0.75 or more counts as a match (`-min-score`).
 | `-cached-only` | off | skip links the downloader would have to fetch first |
 | `-include-low` | off | also accept low-confidence matches |
 | `-lang NAME` | `english` | wanted language, or `any` |
-| `-source NAMES` | `audiobookbay` | where to search, comma-separated, in the order to try |
+| `-source NAMES` | `audiobookbay,knaben` | where to search, comma-separated, in the order to try |
 | `-downloader NAME` | `torbox` | which service fetches the links |
 | `-delay D` | `3s` | pause between requests to a source |
 | `-search-proxy URL` | none | send searches through a proxy |
@@ -135,7 +138,23 @@ next link can start. When the link came from a search, the tool then tries
 the book's next-best listing, as long as that one also counts as a match and
 has nothing against it (an abridged or dramatized edition is never used as a
 fallback), and keeps going until one downloads or none are left. Those fallbacks are noted
-during the search, so trying them needs no further searching.
+during the search, so trying them needs no further searching. If a book runs
+out of listings that way, the sources its dead listing did not come from are
+searched once more before the tool gives up on it.
+
+**Sources.** Each book is searched in the order the sources are given, and a
+later source is only asked when the earlier ones gave no near-certain match;
+then the best listing across all of them wins.
+
+| Name | What it is |
+|------|------------|
+| `audiobookbay` | AudioBook Bay: audiobooks only, with author, edition, format and bitrate on each listing |
+| `knaben` | Knaben: one API over The Pirate Bay and other public trackers |
+| `piratebay` | The Pirate Bay directly; Knaben already covers it, so this is for when Knaben is down |
+
+The general trackers list a release name and little else, so edition, format,
+bitrate and language are read from the name where it says. They do report how
+many people are seeding, and a listing nobody is seeding is never picked.
 
 **A source refusing you?** Sources limit how fast one address may search.
 The tool stops after three failures in a row instead of grinding on; wait and
@@ -176,7 +195,10 @@ type Source interface {
 ```
 
 `fetch.NewFetcher` gives it paced, retried page fetches (and the proxy
-option) for free. `sources/audiobookbay` is the model to copy.
+option) for free. `sources/audiobookbay` is the model to copy for a site read
+page by page, `sources/knaben` for one with a JSON API. `fetch.ParseRelease`
+unpacks a tracker's release name into heading, edition, format, bitrate and
+language.
 
 **A new downloader** is a package under `downloaders/` implementing:
 
@@ -237,7 +259,10 @@ read stdout.
 | `magnet.go` | building and parsing magnet links |
 | `downloader.go` | the `Downloader` interface and its registry |
 | `download.go` | links to files on disk, resumable |
+| `release.go` | unpacking a tracker's release name |
 | `sources/audiobookbay/` | the AudioBook Bay source |
+| `sources/knaben/` | the Knaben source |
+| `sources/piratebay/` | The Pirate Bay source |
 | `downloaders/torbox/` | the TorBox downloader |
 | `cmd/audiobook-fetch/` | the command line |
 
