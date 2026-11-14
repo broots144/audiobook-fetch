@@ -55,7 +55,7 @@ jobs:
           {
             echo "## Test coverage: $total"
             echo
-            echo "Per package (library code; the command-line front end has no tests):"
+            echo "Per package:"
             echo
             echo '```'
             go test -count=1 -cover ./... 2>&1 | grep -v 'no test files'
