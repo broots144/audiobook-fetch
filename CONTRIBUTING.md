@@ -40,7 +40,9 @@ And please:
 
 - **Add a test** for what you changed. Tests must not touch the network or
   need outside programs; follow the fakes in `download_test.go` and
-  `verify_test.go`.
+  `verify_test.go`, and for the commands themselves
+  `cmd/audiobook-fetch/main_test.go`, which runs them against a fake source
+  and a fake download service.
 - **Keep it small.** One change per pull request, with a message that says
   what changed and why.
 - **Update the README** when behaviour or an option changes.
