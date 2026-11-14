@@ -674,3 +674,50 @@ func TestSlowButMovingLinksAreNotGivenUpOn(t *testing.T) {
 		t.Errorf("a link that keeps moving is waited for: %+v, removed %v", results[0], f.removed)
 	}
 }
+
+func TestARejectedDownloadIsSetAsideAndNotFetchedAgain(t *testing.T) {
+	f := newFakeService(t)
+	f.has(hashA, true, map[string]string{"Good/a.mp3": "aaa"})
+	f.has(hashB, true, map[string]string{"Bad/b.mp3": "bbb", "Bad/disc 2/c.mp3": "ccc"})
+	opts := testOptions(t)
+	opts.RemoveAfter = true
+	checked := 0
+	opts.Check = func(paths []string) Verdict {
+		checked++
+		if strings.Contains(paths[0], "Bad") {
+			return Verdict{Status: VerdictRejected, Reasons: []string{"spoken language is de, not en"}}
+		}
+		return Verdict{Status: VerdictFlagged, Flags: []string{"low bitrate (24 kbps)"}}
+	}
+	magnets := []Magnet{magnetFor(hashA), magnetFor(hashB)}
+
+	results, err := Download(f, magnets, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := results[0]; r.Status != DownloadDone || r.Check == nil || r.Check.Status != VerdictFlagged {
+		t.Errorf("a flagged download is kept: %+v", r)
+	}
+	bad := results[1]
+	if bad.Status != DownloadRejected || !strings.Contains(bad.Note, "spoken language is de") || !bad.Removed {
+		t.Errorf("rejected download: %+v", bad)
+	}
+	if got := readFile(t, RejectedDir(opts.Dest), "Bad", "disc 2", "c.mp3"); got != "ccc" {
+		t.Errorf("rejected files should be moved aside intact, got %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(opts.Dest, "Bad")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the rejected book's folder should be gone from the library: %v", err)
+	}
+	if got := readFile(t, opts.Dest, "Good", "a.mp3"); got != "aaa" {
+		t.Errorf("the good book must be untouched, got %q", got)
+	}
+
+	// A second run neither downloads nor checks it again.
+	results, err = Download(f, magnets, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.added) != 2 || checked != 2 || results[1].Status != DownloadRejected || !strings.Contains(results[1].Note, "earlier run") {
+		t.Errorf("second run: added %v, checked %d, result %+v", f.added, checked, results[1])
+	}
+}

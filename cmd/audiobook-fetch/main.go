@@ -41,7 +41,7 @@ func main() {
 	command := "get"
 	if len(args) > 0 {
 		switch args[0] {
-		case "get", "find", "download":
+		case "get", "find", "download", "check":
 			command, args = args[0], args[1:]
 		case "help", "-h", "-help", "--help":
 			usage(os.Stdout)
@@ -54,6 +54,8 @@ func main() {
 		cmdFind(args, cfg)
 	case "download":
 		cmdDownload(args, cfg)
+	case "check":
+		cmdCheck(args, cfg)
 	default:
 		cmdGet(args, cfg)
 	}
@@ -65,6 +67,7 @@ func usage(w io.Writer) {
   %[1]s LIST [FOLDER]            find each book and download it
   %[1]s find LIST                only find the links (writes a report)
   %[1]s download LINKS [FOLDER]  only download magnet links you already have
+  %[1]s check [FOLDER]           check the audio of books already downloaded
 
 LIST is a text file with one book per line, for example:
 
@@ -99,6 +102,9 @@ type config struct {
 	SearchProxy string   `json:"search_proxy"` // default for -search-proxy
 	Sources     []string `json:"sources"`      // default for -source, in the order to try them
 	Downloader  string   `json:"downloader"`   // default for -downloader
+	// Check is the default for -check; left out, downloads are checked.
+	Check        *bool  `json:"check"`
+	WhisperModel string `json:"whisper_model"` // default for -whisper-model
 }
 
 func configDir() string {
@@ -213,6 +219,7 @@ func cmdGet(args []string, cfg config) {
 		fatal(err)
 	}
 	download.opts.Dest = dest
+	download.lang = search.lang
 	text, err := readInput(positional[0])
 	if err != nil {
 		fatal(err)
@@ -268,7 +275,7 @@ func cmdGet(args []string, cfg config) {
 		}
 		links = nextBestLinks(results, byHash, seen, searchedAgain, &search)
 		if len(links) > 0 {
-			fmt.Fprintf(os.Stderr, "\n%d book(s) had a listing with no seeds; trying the next-best listing of each\n", len(links))
+			fmt.Fprintf(os.Stderr, "\n%d book(s) had a listing with no seeds or one the check rejected; trying the next-best listing of each\n", len(links))
 		}
 	}
 	failed := 0
@@ -285,12 +292,12 @@ func cmdGet(args []string, cfg config) {
 		for _, r := range results {
 			if !actionable(r, search.includeLow) {
 				attention++
-			} else if byHash[r.Candidate.InfoHash].Status == fetch.DownloadNoSeeds {
+			} else if unusable(byHash[r.Candidate.InfoHash]) {
 				unseeded++
 			}
 		}
 		if unseeded > 0 {
-			fmt.Fprintf(os.Stderr, "%d book(s) were not downloaded because no matching listing has seeds right now; see %s\n",
+			fmt.Fprintf(os.Stderr, "%d book(s) were not downloaded because no matching listing has seeds right now or passes the check; see %s\n",
 				unseeded, filepath.Join(reportDir, "results.csv"))
 		}
 		if attention > 0 {
@@ -316,17 +323,21 @@ func nextBestLinks(results []fetch.Result, downloads map[string]fetch.DownloadRe
 	var links []fetch.Magnet
 	for i := range results {
 		r := &results[i]
-		if !actionable(*r, s.includeLow) || downloads[r.Candidate.InfoHash].Status != fetch.DownloadNoSeeds {
+		if !actionable(*r, s.includeLow) || !unusable(downloads[r.Candidate.InfoHash]) {
 			continue
 		}
+		why := "the first choice had no seeds"
+		if downloads[r.Candidate.InfoHash].Status == fetch.DownloadRejected {
+			why = "the first choice failed the check"
+		}
 		moved := false
-		for !moved && r.NextBest("the first choice had no seeds") {
+		for !moved && r.NextBest(why) {
 			hash := r.Candidate.InfoHash
 			if !tried[hash] {
 				tried[hash] = true
 				links = append(links, fetch.Magnet{Hash: hash, URI: r.Magnet})
 			}
-			moved = downloads[hash].Status != fetch.DownloadNoSeeds
+			moved = !unusable(downloads[hash])
 		}
 		if moved || searchedAgain[r.Wanted.Raw] {
 			continue
@@ -345,10 +356,16 @@ func nextBestLinks(results []fetch.Result, downloads map[string]fetch.DownloadRe
 		if !actionable(again, s.includeLow) || tried[again.Candidate.InfoHash] {
 			continue
 		}
-		again.Note = strings.TrimSuffix("found elsewhere: every listing on "+r.Candidate.Source+" had no seeds; "+again.Note, "; ")
+		again.Note = strings.TrimSuffix("found elsewhere: no usable listing on "+r.Candidate.Source+"; "+again.Note, "; ")
 		*r = again
 		tried[again.Candidate.InfoHash] = true
 		links = append(links, fetch.Magnet{Hash: again.Candidate.InfoHash, URI: again.Magnet})
 	}
 	return links
+}
+
+// unusable reports that a link produced nothing to keep: nobody is seeding
+// it, or what came down failed the check.
+func unusable(d fetch.DownloadResult) bool {
+	return d.Status == fetch.DownloadNoSeeds || d.Status == fetch.DownloadRejected
 }

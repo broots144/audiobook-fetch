@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -17,6 +18,9 @@ type downloadFlags struct {
 	opts    fetch.DownloadOptions
 	name    string
 	keyFile string
+	check   bool   // examine the audio once it is downloaded
+	model   string // whisper.cpp model file for the listening checks
+	lang    string // language the audio should be in; set by the command
 }
 
 func (d *downloadFlags) register(flags *flag.FlagSet, cfg config) {
@@ -31,6 +35,8 @@ func (d *downloadFlags) register(flags *flag.FlagSet, cfg config) {
 	flags.DurationVar(&d.opts.Wait, "wait", d.opts.Wait, "how long to wait for the service to fetch links it does not have yet")
 	flags.DurationVar(&d.opts.StallAfter, "stall-after", d.opts.StallAfter, "give up on a link the service makes no progress on for this long, freeing its slot (0 = keep waiting)")
 	flags.DurationVar(&d.opts.Poll, "poll", d.opts.Poll, "how often to check on links the service is still fetching")
+	flags.BoolVar(&d.check, "check", cfg.Check == nil || *cfg.Check, "check each download's audio: playable, bitrate, spoken language, abridged or dramatized (needs ffprobe; listening needs ffmpeg, whisper-cli and a model)")
+	flags.StringVar(&d.model, "whisper-model", defaultModel(cfg), "whisper.cpp model file used to listen to samples")
 	flags.StringVar(&d.keyFile, "key-file", "", "file holding the service's API key (default: <name>.key in the config folder, or the <NAME>_API_KEY variable)")
 }
 
@@ -39,6 +45,7 @@ func cmdDownload(args []string, cfg config) {
 	var download downloadFlags
 	flags := flag.NewFlagSet("download", flag.ExitOnError)
 	download.register(flags, cfg)
+	flags.StringVar(&download.lang, "lang", fetch.DefaultOptions().Language, `language the audio should be in, or "any"`)
 	printJSON := flags.Bool("json", false, "print the per-link results as JSON on stdout")
 	quiet := flags.Bool("quiet", false, "only print the summary")
 	flags.Usage = func() {
@@ -94,6 +101,15 @@ func downloadLinks(magnets []fetch.Magnet, d *downloadFlags, quiet bool) ([]fetc
 		return nil, err
 	}
 	opts := d.opts
+	if d.check {
+		checker := newChecker(d.lang, d.model)
+		for _, gap := range checker.Missing() {
+			fmt.Fprintf(os.Stderr, "check: %s\n", gap)
+		}
+		if checker.FFprobe != "" {
+			opts.Check = checker.Check
+		}
+	}
 	var received atomic.Int64
 	if !quiet {
 		opts.Log = func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
@@ -109,9 +125,12 @@ func downloadLinks(magnets []fetch.Magnet, d *downloadFlags, quiet bool) ([]fetc
 	}
 
 	counts := map[string]int{}
-	var files, fetched, removed int
+	var files, fetched, removed, flagged int
 	var bytes int64
 	for _, r := range results {
+		if r.Check != nil && r.Check.Status == fetch.VerdictFlagged {
+			flagged++
+		}
 		counts[r.Status]++
 		files += r.Files
 		fetched += r.Fetched
@@ -127,6 +146,13 @@ func downloadLinks(magnets []fetch.Magnet, d *downloadFlags, quiet bool) ([]fetc
 		files, opts.Dest, fetched, float64(bytes)/1e9, time.Since(start).Round(time.Second))
 	if opts.RemoveAfter {
 		fmt.Fprintf(os.Stderr, "%d item(s) removed from %s\n", removed, service.Name())
+	}
+	if counts[fetch.DownloadRejected] > 0 {
+		fmt.Fprintf(os.Stderr, "%d download(s) were rejected by the check and moved to %s\n",
+			counts[fetch.DownloadRejected], fetch.RejectedDir(opts.Dest))
+	}
+	if flagged > 0 {
+		fmt.Fprintf(os.Stderr, "%d download(s) were kept but flagged by the check; see the \"check:\" lines above\n", flagged)
 	}
 	if counts[fetch.DownloadNoSeeds] > 0 {
 		fmt.Fprintf(os.Stderr, "%d link(s) were given up on: %s made no progress on them for %s (usually nobody is seeding them)\n",
@@ -165,4 +191,91 @@ func showThroughput(received *atomic.Int64) (stop func()) {
 		}
 	}()
 	return func() { close(done) }
+}
+
+// newChecker sets up the post-download check for a wanted language as the
+// -lang option spells it.
+func newChecker(lang, model string) *fetch.Checker {
+	if strings.EqualFold(lang, "any") {
+		lang = ""
+	}
+	return fetch.NewChecker(lang, model)
+}
+
+// defaultModel finds the whisper.cpp model: the configured one, else
+// WHISPER_MODEL, else the first model file in the config folder's models/.
+func defaultModel(cfg config) string {
+	if cfg.WhisperModel != "" {
+		return cfg.WhisperModel
+	}
+	if model := os.Getenv("WHISPER_MODEL"); model != "" {
+		return model
+	}
+	found, _ := filepath.Glob(filepath.Join(configDir(), "models", "ggml-*.bin"))
+	if len(found) > 0 {
+		return found[0]
+	}
+	return ""
+}
+
+// cmdCheck examines audiobooks that are already in a folder: each subfolder
+// is taken as one book. It reports and changes nothing.
+func cmdCheck(args []string, cfg config) {
+	flags := flag.NewFlagSet("check", flag.ExitOnError)
+	lang := flags.String("lang", fetch.DefaultOptions().Language, `language the audio should be in, or "any"`)
+	model := flags.String("whisper-model", defaultModel(cfg), "whisper.cpp model file used to listen to samples")
+	printJSON := flags.Bool("json", false, "print the verdicts as JSON on stdout")
+	flags.Usage = func() {
+		fmt.Fprintf(os.Stderr, "usage: %s check [options] [FOLDER]\n\nChecks the audio of every book in FOLDER (each subfolder is one book): playable,\nbitrate, spoken language, abridged or dramatized. Nothing is moved or deleted.\n\noptions:\n", fetch.AppName)
+		flags.PrintDefaults()
+	}
+	positional := parseArgs(flags, args)
+	if len(positional) > 1 {
+		flags.Usage()
+		os.Exit(2)
+	}
+	folder, err := destination(positional, 0, cfg.To)
+	if err != nil {
+		fatal(err)
+	}
+	checker := newChecker(*lang, *model)
+	for _, gap := range checker.Missing() {
+		fmt.Fprintf(os.Stderr, "check: %s\n", gap)
+	}
+	if checker.FFprobe == "" {
+		os.Exit(1)
+	}
+	entries, err := os.ReadDir(folder)
+	if err != nil {
+		fatal(err)
+	}
+	verdicts := map[string]fetch.Verdict{}
+	counts := map[string]int{}
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		var paths []string
+		_ = filepath.WalkDir(filepath.Join(folder, entry.Name()), func(path string, d os.DirEntry, err error) error {
+			if err == nil && d.Type().IsRegular() && !strings.HasPrefix(d.Name(), ".") {
+				paths = append(paths, path)
+			}
+			return nil
+		})
+		verdict := checker.Check(paths)
+		verdicts[entry.Name()] = verdict
+		counts[verdict.Status]++
+		fmt.Fprintf(os.Stderr, "%s\n        %s\n", entry.Name(), verdict.Summary())
+	}
+	fmt.Fprintf(os.Stderr, "\n%d books: %d ok, %d flagged, %d rejected, %d unchecked\n", len(verdicts),
+		counts[fetch.VerdictOK], counts[fetch.VerdictFlagged], counts[fetch.VerdictRejected], counts[fetch.VerdictUnchecked])
+	if *printJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.SetEscapeHTML(false)
+		_ = enc.Encode(verdicts)
+	}
+	if counts[fetch.VerdictRejected] > 0 {
+		os.Exit(1)
+	}
 }
