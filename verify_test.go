@@ -17,6 +17,9 @@ type fakeTools struct {
 	heard    []string // language detections, in the order they are asked for
 	opening  string   // what the transcribed opening contains
 	listened int
+	// Per file extension, for books that come in several formats.
+	seconds map[string]float64
+	kbpsFor map[string]int
 }
 
 func (f *fakeTools) run(name string, args ...string) ([]byte, []byte, error) {
@@ -26,8 +29,19 @@ func (f *fakeTools) run(name string, args ...string) ([]byte, []byte, error) {
 		if f.broken[filepath.Base(last)] {
 			return nil, nil, errors.New("invalid data")
 		}
-		out := fmt.Sprintf(`{"streams":[{"codec_name":"mp3","codec_type":"audio"},{"codec_name":"png","codec_type":"video"}],
-			"format":{"duration":"3600.0","bit_rate":"%d","tags":{"Title":%q}}}`, f.kbps*1000, f.tags[filepath.Base(last)])
+		ext := strings.ToLower(filepath.Ext(last))
+		codec, seconds, kbps := "mp3", 3600.0, f.kbps
+		if ext == ".m4b" || ext == ".m4a" {
+			codec = "aac"
+		}
+		if s, ok := f.seconds[ext]; ok {
+			seconds = s
+		}
+		if k, ok := f.kbpsFor[ext]; ok {
+			kbps = k
+		}
+		out := fmt.Sprintf(`{"streams":[{"codec_name":%q,"codec_type":"audio"},{"codec_name":"png","codec_type":"video"}],
+			"format":{"duration":"%.1f","bit_rate":"%d","tags":{"Title":%q}}}`, codec, seconds, kbps*1000, f.tags[filepath.Base(last)])
 		return []byte(out), nil, nil
 	case "ffmpeg":
 		return nil, nil, nil
@@ -131,5 +145,71 @@ func TestCheckSaysWhatItCouldNotDo(t *testing.T) {
 	c.FFprobe = ""
 	if v = c.Check(bookFiles(t, "01.mp3")); v.Status != VerdictUnchecked || !strings.Contains(v.Skipped[0], "ffprobe is not installed") {
 		t.Errorf("without ffprobe: %+v", v)
+	}
+}
+
+func TestCheckKeepsOneFormatOfABookHeldInSeveral(t *testing.T) {
+	names := func(dir, ext string, n int) []string {
+		var out []string
+		for i := 1; i <= n; i++ {
+			out = append(out, fmt.Sprintf("%s/%02d%s", dir, i, ext))
+		}
+		return out
+	}
+	// The whole book three times: one M4B, ten MP3s, ten M4As. The M4B is
+	// the worst-sounding by far; the other two sound alike, and the M4As
+	// are smaller.
+	tools := &fakeTools{heard: []string{"en (p = 0.99)"},
+		seconds: map[string]float64{".m4b": 36000, ".mp3": 3600, ".m4a": 3605},
+		kbpsFor: map[string]int{".m4b": 17, ".mp3": 47, ".m4a": 32}}
+	files := bookFiles(t, append(append([]string{"book.m4b", "cover.jpg"}, names("MP3", ".mp3", 10)...), names("MP3", ".m4a", 10)...)...)
+	v := checkerWith(tools).Check(files)
+	if v.Status != VerdictOK || v.AudioFiles != 10 || v.Hours != 10 || v.Kbps != 32 || v.Codec != "aac" || len(v.Duplicates) != 11 {
+		t.Fatalf("verdict: %+v", v)
+	}
+	want := "the same book in 3 formats: keeping m4a (10 files, 32 kbps); duplicates: mp3 (10 files, 47 kbps), m4b (1 file, 17 kbps)"
+	if len(v.Notes) != 1 || v.Notes[0] != want || !strings.Contains(v.Summary(), want) {
+		t.Errorf("note: %q", v.Notes)
+	}
+	for _, path := range v.Duplicates {
+		if ext := filepath.Ext(path); ext != ".mp3" && ext != ".m4b" {
+			t.Errorf("%s is not a duplicate", path)
+		}
+	}
+	if duplicates, note := checkerWith(tools).DuplicateFormats(files); len(duplicates) != 11 || note != want {
+		t.Errorf("DuplicateFormats: %d files, %q", len(duplicates), note)
+	}
+
+	// When the formats sound as good as each other, the single M4B wins.
+	tools.kbpsFor = map[string]int{".m4b": 64, ".mp3": 96, ".m4a": 64}
+	v = checkerWith(tools).Check(files)
+	if v.AudioFiles != 1 || len(v.Duplicates) != 20 || !strings.Contains(v.Notes[0], "keeping m4b (1 file, 64 kbps)") {
+		t.Errorf("equal quality: %+v", v)
+	}
+}
+
+func TestCheckLeavesAloneWhatIsNotARepeat(t *testing.T) {
+	for name, c := range map[string]struct {
+		files   []string
+		seconds map[string]float64
+	}{
+		"one format in two folders":      {[]string{"CD1/01.mp3", "CD1/02.mp3", "CD2/01.mp3", "CD2/02.mp3"}, nil},
+		"a book and a shorter extra":     {[]string{"book.m4b", "interview.mp3"}, map[string]float64{".m4b": 36000, ".mp3": 1800}},
+		"two halves in different format": {[]string{"part1.mp3", "part2.m4a"}, map[string]float64{".mp3": 18000, ".m4a": 16000}},
+		"an incomplete second copy":      {[]string{"book.m4b", "01.mp3", "02.mp3"}, map[string]float64{".m4b": 36000, ".mp3": 17000}},
+		"two short clips":                {[]string{"a.mp3", "a.m4a"}, map[string]float64{".mp3": 300, ".m4a": 300}},
+	} {
+		tools := &fakeTools{kbps: 64, heard: []string{"en (p = 0.99)"}, seconds: c.seconds}
+		v := checkerWith(tools).Check(bookFiles(t, c.files...))
+		if len(v.Duplicates) != 0 || len(v.Notes) != 0 || v.AudioFiles != len(c.files) {
+			t.Errorf("%s: %+v", name, v)
+		}
+	}
+}
+
+func TestCheckDoesNotRejectABookStillInsideAnArchive(t *testing.T) {
+	v := checkerWith(&fakeTools{}).Check(bookFiles(t, "book.rar", "readme.txt"))
+	if v.Status != VerdictUnchecked || len(v.Skipped) != 1 || !strings.Contains(v.Skipped[0], "inside 1 archive(s)") {
+		t.Errorf("verdict: %+v", v)
 	}
 }

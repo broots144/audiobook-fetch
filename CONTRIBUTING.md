@@ -56,7 +56,7 @@ And please:
 The work is two stages joined by a magnet link:
 
 ```
-list ──▶ Source ──▶ best listing ──▶ magnet link ──▶ Downloader ──▶ files ──▶ check
+list ──▶ Source ──▶ best listing ──▶ magnet link ──▶ Downloader ──▶ files ──▶ unpack ──▶ check
 ```
 
 | Path | What |
@@ -69,7 +69,8 @@ list ──▶ Source ──▶ best listing ──▶ magnet link ──▶ Dow
 | `downloader.go` | the `Downloader` interface and its registry |
 | `download.go` | links to files on disk, resumable |
 | `release.go` | unpacking a tracker's release name |
-| `verify.go` | checking the audio of what was downloaded |
+| `unpack.go` | unpacking downloads that arrive as zip, rar or 7z |
+| `verify.go` | checking the audio of what was downloaded, and spotting the same book in several formats |
 | `sources/` | one package per place to search |
 | `downloaders/` | one package per download service |
 | `cmd/audiobook-fetch/` | the command line |

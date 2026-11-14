@@ -45,6 +45,10 @@ type Verdict struct {
 	Reasons []string `json:"reasons,omitempty"` // why it was rejected
 	Flags   []string `json:"flags,omitempty"`   // what deserves a look
 	Skipped []string `json:"skipped,omitempty"` // checks that could not run
+	Notes   []string `json:"notes,omitempty"`   // worth knowing, nothing wrong
+	// Duplicates are the files of the same book in other formats than the
+	// one worth keeping. They are left out of the figures below.
+	Duplicates []string `json:"duplicates,omitempty"`
 
 	AudioFiles int     `json:"audio_files"`
 	Unplayable int     `json:"unplayable,omitempty"`
@@ -63,7 +67,7 @@ func (v Verdict) Summary() string {
 	if v.Language != "" {
 		parts = append(parts, "spoken language "+v.Language)
 	}
-	for _, list := range [][]string{v.Reasons, v.Flags} {
+	for _, list := range [][]string{v.Reasons, v.Flags, v.Notes} {
 		if len(list) > 0 {
 			parts = append(parts, strings.Join(list, "; "))
 		}
@@ -164,14 +168,14 @@ type probed struct {
 // Check examines the files of one downloaded item.
 func (c *Checker) Check(paths []string) Verdict {
 	var v Verdict
-	var audio []string
-	for _, path := range paths {
-		if audioExtensions[strings.ToLower(filepath.Ext(path))] {
-			audio = append(audio, path)
-		}
-	}
-	sort.Strings(audio)
+	audio, archives := audioFiles(paths)
 	v.AudioFiles = len(audio)
+	if len(audio) == 0 && archives > 0 {
+		// The book may well be in there; that is not grounds to reject it.
+		v.Status = VerdictUnchecked
+		v.Skipped = []string{fmt.Sprintf("the audio may be inside %d archive(s) that could not be unpacked", archives)}
+		return v
+	}
 	if len(audio) == 0 {
 		v.Status = VerdictRejected
 		v.Reasons = []string{fmt.Sprintf("no audio files among the %d downloaded", len(paths))}
@@ -182,24 +186,34 @@ func (c *Checker) Check(paths []string) Verdict {
 		return v
 	}
 
-	files := c.probeAll(audio)
 	var playable []probed
-	var seconds, bits float64
-	codecs := map[string]float64{}
-	for _, f := range files {
+	for _, f := range c.probeAll(audio) {
 		if f.seconds <= 0 {
 			v.Unplayable++
 			continue
 		}
 		playable = append(playable, f)
-		seconds += f.seconds
-		bits += f.bitsPerS * f.seconds
-		codecs[f.codec] += f.seconds
 	}
 	if len(playable) == 0 {
 		v.Status = VerdictRejected
 		v.Reasons = []string{fmt.Sprintf("none of the %d audio files can be played", len(audio))}
 		return v
+	}
+	// The same book in several formats is judged by the one worth keeping.
+	playable, duplicates, repeats := oneFormat(playable)
+	if len(duplicates) > 0 {
+		v.Notes = append(v.Notes, repeats)
+		for _, f := range duplicates {
+			v.Duplicates = append(v.Duplicates, f.path)
+		}
+		v.AudioFiles -= len(duplicates)
+	}
+	var seconds, bits float64
+	codecs := map[string]float64{}
+	for _, f := range playable {
+		seconds += f.seconds
+		bits += f.bitsPerS * f.seconds
+		codecs[f.codec] += f.seconds
 	}
 	v.Hours = float64(int(seconds/360+0.5)) / 10
 	v.Kbps = int(bits/seconds/1000 + 0.5)
@@ -209,7 +223,7 @@ func (c *Checker) Check(paths []string) Verdict {
 		}
 	}
 	if v.Unplayable > 0 {
-		v.Flags = append(v.Flags, fmt.Sprintf("%d of %d audio files cannot be played", v.Unplayable, len(audio)))
+		v.Flags = append(v.Flags, fmt.Sprintf("%d of %d audio files cannot be played", v.Unplayable, v.AudioFiles))
 	}
 	if v.Kbps > 0 && v.Kbps < lowBitrateKbps {
 		v.Flags = append(v.Flags, fmt.Sprintf("low bitrate (%d kbps)", v.Kbps))
@@ -247,6 +261,170 @@ func (c *Checker) Check(paths []string) Verdict {
 		v.Status = VerdictOK
 	}
 	return v
+}
+
+// audioFiles picks the audio out of an item's files, in name order, and
+// counts the archives among the rest.
+func audioFiles(paths []string) (audio []string, archives int) {
+	for _, path := range paths {
+		if audioExtensions[strings.ToLower(filepath.Ext(path))] {
+			audio = append(audio, path)
+		} else if IsArchive(path) {
+			archives++
+		}
+	}
+	sort.Strings(audio)
+	return audio, archives
+}
+
+// DuplicateFormats finds the files that hold the same book again in another
+// format than the one worth keeping, and says in a line what it found. It
+// only reads the files; nothing is moved.
+func (c *Checker) DuplicateFormats(paths []string) (duplicates []string, note string) {
+	audio, _ := audioFiles(paths)
+	if c.FFprobe == "" || len(audio) == 0 {
+		return nil, ""
+	}
+	var playable []probed
+	for _, f := range c.probeAll(audio) {
+		if f.seconds > 0 {
+			playable = append(playable, f)
+		}
+	}
+	_, extra, note := oneFormat(playable)
+	for _, f := range extra {
+		duplicates = append(duplicates, f.path)
+	}
+	return duplicates, note
+}
+
+const (
+	sameLength   = 0.02 // two formats this close in running time are the same book
+	shortestBook = 10 * time.Minute
+	asGoodAs     = 0.9 // a format within this of the best-sounding counts as its equal
+)
+
+// format is every file of one kind (all the .mp3, say) among a book's files.
+type format struct {
+	ext     string
+	files   []probed
+	seconds float64
+	bits    float64
+	codec   string
+}
+
+func (f format) kbps() int { return int(f.bits/f.seconds/1000 + 0.5) }
+
+// quality ranks how a format sounds: bitrate, weighted by how efficient
+// the codec is, the same way listings are compared before downloading.
+func (f format) quality() float64 {
+	switch f.codec {
+	case "flac", "alac", "wavpack", "pcm_s16le", "pcm_s24le":
+		return 1000
+	case "aac", "opus", "vorbis":
+		return f.bits / f.seconds / 1000 * 1.5
+	}
+	return f.bits / f.seconds / 1000
+}
+
+func (f format) describe() string {
+	plural := "s"
+	if len(f.files) == 1 {
+		plural = ""
+	}
+	return fmt.Sprintf("%s (%d file%s, %d kbps)", strings.TrimPrefix(f.ext, "."), len(f.files), plural, f.kbps())
+}
+
+// oneFormat splits a book's files into the format to keep and the files of
+// other formats that merely repeat it.
+//
+// Some downloads hold the whole book two or three times over: once as an
+// M4B, again as MP3s. Files count as a repeat only when all the files of
+// one format run, in total, as long as all the files of another (to within
+// 2%): that is the same recording twice, not two halves of one. Anything
+// else is left alone: a sample, a bonus track, a second book.
+//
+// The best-sounding format is kept. Among formats that sound as good, a
+// single M4B wins (it carries chapters), then fewer files, then less space.
+func oneFormat(playable []probed) (keep, duplicates []probed, note string) {
+	byExt := map[string]*format{}
+	var formats []*format
+	for _, f := range playable {
+		ext := strings.ToLower(filepath.Ext(f.path))
+		group := byExt[ext]
+		if group == nil {
+			group = &format{ext: ext, codec: f.codec}
+			byExt[ext] = group
+			formats = append(formats, group)
+		}
+		group.files = append(group.files, f)
+		group.seconds += f.seconds
+		group.bits += f.bitsPerS * f.seconds
+	}
+	if len(formats) < 2 {
+		return playable, nil, ""
+	}
+	sort.SliceStable(formats, func(i, j int) bool { return formats[i].seconds > formats[j].seconds })
+	longest := formats[0].seconds
+	if longest < shortestBook.Seconds() {
+		return playable, nil, ""
+	}
+	var same []*format
+	for _, f := range formats {
+		if f.seconds >= longest*(1-sameLength) {
+			same = append(same, f)
+		}
+	}
+	if len(same) < 2 {
+		return playable, nil, ""
+	}
+
+	best := 0.0
+	for _, f := range same {
+		best = max(best, f.quality())
+	}
+	rank := func(f *format) (int, int, int, float64) {
+		worse, notM4B := 1, 1
+		if f.quality() >= best*asGoodAs {
+			worse = 0
+		}
+		if f.ext == ".m4b" && len(f.files) == 1 {
+			notM4B = 0
+		}
+		return worse, notM4B, len(f.files), f.bits
+	}
+	sort.SliceStable(same, func(i, j int) bool {
+		a1, a2, a3, a4 := rank(same[i])
+		b1, b2, b3, b4 := rank(same[j])
+		switch {
+		case a1 != b1:
+			return a1 < b1
+		case a2 != b2:
+			return a2 < b2
+		case a3 != b3:
+			return a3 < b3
+		case a4 != b4:
+			return a4 < b4
+		}
+		return same[i].ext < same[j].ext
+	})
+
+	dropped := map[string]bool{}
+	var others []string
+	for _, f := range same[1:] {
+		dropped[f.ext] = true
+		others = append(others, f.describe())
+	}
+	for _, f := range playable {
+		if dropped[strings.ToLower(filepath.Ext(f.path))] {
+			duplicates = append(duplicates, f)
+		} else {
+			keep = append(keep, f)
+		}
+	}
+	note = fmt.Sprintf("the same book in %d formats: keeping %s; duplicates: %s",
+		len(same), same[0].describe(), strings.Join(others, ", "))
+	return keep, duplicates, note
 }
 
 func (c *Checker) probeAll(audio []string) []probed {
