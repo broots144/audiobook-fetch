@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	fetch "github.com/broots144/audiobook-fetch"
@@ -182,6 +183,9 @@ func readKey(downloader, keyFile string) (string, error) {
 	}
 	if keyFile == "" {
 		keyFile = filepath.Join(configDir(), downloader+".key")
+	}
+	if info, err := os.Stat(keyFile); err == nil && runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		fmt.Fprintf(os.Stderr, "warning: %s can be read by other users of this machine; run: chmod 600 %s\n", keyFile, keyFile)
 	}
 	data, err := os.ReadFile(keyFile)
 	if errors.Is(err, os.ErrNotExist) {

@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Format
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Known vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      # The tests use fakes for the sources, the download service and the
+      # audio tools, so they need no network, ffmpeg or whisper.
+      - name: Test with coverage
+        run: go test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
+
+      - name: Coverage summary
+        run: |
+          go tool cover -func=coverage.out > coverage.txt
+          total=$(awk '/^total:/ {print $NF}' coverage.txt)
+          {
+            echo "## Test coverage: $total"
+            echo
+            echo "Per package (library code; the command-line front end has no tests):"
+            echo
+            echo '```'
+            go test -count=1 -cover ./... 2>&1 | grep -v 'no test files'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Total coverage: $total"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: |
+            coverage.out
+            coverage.txt
+          retention-days: 14
