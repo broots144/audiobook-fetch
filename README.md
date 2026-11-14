@@ -37,7 +37,9 @@ Put your TorBox API key in `~/.config/audiobook-fetch/torbox.key`, or set
   "remove_after": true,
   "sources": ["audiobookbay", "knaben"],
   "downloader": "torbox",
-  "search_proxy": ""
+  "search_proxy": "",
+  "check": true,
+  "whisper_model": "/path/to/ggml-base.bin"
 }
 ```
 
@@ -120,7 +122,9 @@ A pick scoring 0.75 or more counts as a match (`-min-score`).
 | `-stall-after D` | `5m` | give up on a link the downloader makes no progress on for this long (`0` keeps waiting) |
 | `-parallel N` | `3` | files to download at once |
 | `-fresh` | off | search every book again, ignoring earlier matches |
-| `-redo` | off | download links again even if an earlier run completed them |
+| `-redo` | off | download links again even if an earlier run completed or rejected them |
+| `-check` | on | check each download's audio once it is here (`-check=false` turns it off) |
+| `-whisper-model FILE` | see below | whisper.cpp model used to listen to samples |
 | `-quiet` | off | only print the summaries |
 
 **`-remove-after`** only ever removes items this tool added, and only once
@@ -141,6 +145,32 @@ fallback), and keeps going until one downloads or none are left. Those fallbacks
 during the search, so trying them needs no further searching. If a book runs
 out of listings that way, the sources its dead listing did not come from are
 searched once more before the tool gives up on it.
+
+**Checking what came down.** A listing's description is only a claim, so once
+an item's files are here the audio itself is examined:
+
+- *Does it play, and how good is it?* `ffprobe` (part of ffmpeg) reads every
+  audio file for its length, bitrate and codec.
+- *What language is spoken?* `whisper-cli`
+  ([whisper.cpp](https://github.com/ggerganov/whisper.cpp)) listens to three
+  half-minute samples spread through the book.
+- *Is it the plain, full reading?* File names, tags and the first two minutes
+  are searched for words like "abridged", "dramatized" and "full cast".
+
+A download with no audio files, none that play, or most samples in another
+language than `-lang` is **rejected**: its files are moved to
+`.audiobook-fetch/rejected/` inside the download folder (nothing is deleted),
+it is removed from the downloader if this tool added it, and it is not fetched
+again on later runs unless `-redo` is given. When the link came from a search,
+the book's next-best listing is tried, as for a link with no seeds. Lesser
+doubts (low bitrate, some unplayable files, an edition word, one odd language
+sample) only **flag** the download; it is kept and the `check:` line says why.
+
+Both tools are optional. Without `ffprobe` nothing is checked; without
+`ffmpeg`, `whisper-cli` or a model file the listening checks are skipped, and
+the tool says so. The model is `-whisper-model`, else `whisper_model` in the
+config, else `WHISPER_MODEL`, else the first `ggml-*.bin` in
+`~/.config/audiobook-fetch/models/`.
 
 **Sources.** Each book is searched in the order the sources are given, and a
 later source is only asked when the earlier ones gave no near-certain match;
@@ -168,10 +198,13 @@ proxy.
 ```sh
 audiobook-fetch find books.txt                  # only find links; writes results/
 audiobook-fetch download magnets.txt /folder    # only download links you already have
+audiobook-fetch check /folder                   # only check books already downloaded
 ```
 
 `find` writes `magnets.txt` (one link per confident match), `results.csv` and
-`results.json`. `download` takes any file of magnet links.
+`results.json`. `download` takes any file of magnet links. `check` treats each
+subfolder as one book and prints a verdict for each (`-json` for machines); it
+moves and deletes nothing, and exits non-zero if it would reject any.
 
 ## Extending
 

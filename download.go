@@ -27,6 +27,7 @@ const (
 	DownloadNotReady  = "not_ready"
 	DownloadStalled   = "stalled"
 	DownloadNoSeeds   = "no_seeds" // given up on: the service made no progress on it
+	DownloadRejected  = "rejected" // downloaded, checked, and found not to be what was asked for
 	DownloadFailed    = "failed"
 
 	partSuffix         = ".part"
@@ -45,8 +46,12 @@ type DownloadOptions struct {
 	Poll        time.Duration // how often to check on items the service is still fetching
 	StallAfter  time.Duration // give up on a link the service makes no progress on for this long; 0 waits the full Wait
 	Idle        time.Duration // give up on a connection that sends nothing for this long
-	Log         func(format string, args ...any)
-	OnBytes     func(n int64) // called as data arrives, for progress display
+	// Check, when set, examines each item's files once they are all here.
+	// An item it rejects is moved out of the folder (see RejectedDir) and
+	// reported as rejected instead of downloaded.
+	Check   func(paths []string) Verdict
+	Log     func(format string, args ...any)
+	OnBytes func(n int64) // called as data arrives, for progress display
 
 	sleep func(time.Duration)
 	now   func() time.Time
@@ -68,12 +73,18 @@ type DownloadResult struct {
 	Bytes   int64  `json:"bytes"`   // bytes this run downloaded
 	Size    int64  `json:"size"`    // total size of the item's files
 	Removed bool   `json:"removed"` // removed from the service afterwards
-	Note    string `json:"note,omitempty"`
+	// Check is what examining the files found, when checking is on.
+	Check *Verdict `json:"check,omitempty"`
+	Note  string   `json:"note,omitempty"`
 }
 
 // BookkeepingDir is the folder the tool keeps its own files in, inside a
 // download folder: the record of what it added to the service, and its reports.
 func BookkeepingDir(dest string) string { return filepath.Join(dest, "."+AppName) }
+
+// RejectedDir is where the files of rejected items are moved to, so that
+// they are out of the library but nothing is destroyed on a machine's say-so.
+func RejectedDir(dest string) string { return filepath.Join(BookkeepingDir(dest), "rejected") }
 
 // state is what the tool remembers between runs, per download folder.
 type state struct {
@@ -83,7 +94,10 @@ type state struct {
 	// Done is what has been fully downloaded here, so that a later run does
 	// not hand the link to the service again just to find nothing to do.
 	Done map[string]bool `json:"done"`
-	path string
+	// Rejected is what was downloaded and then found wanting, and why, so
+	// that a later run does not fetch the same thing just to reject it again.
+	Rejected map[string]string `json:"rejected,omitempty"`
+	path     string
 }
 
 func loadState(dest string, service Downloader) *state {
@@ -97,6 +111,9 @@ func loadState(dest string, service Downloader) *state {
 	}
 	if s.Done == nil {
 		s.Done = map[string]bool{}
+	}
+	if s.Rejected == nil {
+		s.Rejected = map[string]string{}
 	}
 	return s
 }
@@ -180,6 +197,11 @@ func Download(service Downloader, magnets []Magnet, opts DownloadOptions) ([]Dow
 			opts.Log("[%d/%d] %s  downloaded by an earlier run", i+1, len(magnets), short(m.Hash))
 			continue
 		}
+		if why, rejected := st.Rejected[m.Hash]; rejected && !opts.Redo {
+			results[i].Status, results[i].Note = DownloadRejected, "rejected by an earlier run: "+why
+			opts.Log("[%d/%d] %s  rejected by an earlier run: %s", i+1, len(magnets), short(m.Hash), why)
+			continue
+		}
 		if opts.CachedOnly && !cached[m.Hash] {
 			results[i].Status, results[i].Note = DownloadNotCached, name+" does not have it cached"
 			opts.Log("[%d/%d] %s  skipped: not cached on %s", i+1, len(magnets), short(m.Hash), name)
@@ -223,6 +245,9 @@ func Download(service Downloader, magnets []Magnet, opts DownloadOptions) ([]Dow
 			r := results[i]
 			opts.Log("[%d/%d] %s  %s: %d files, %s%s  %s", i+1, len(magnets), short(m.Hash), r.Status,
 				r.Files, humanBytes(r.Size), removedNote(r, name), r.Name)
+			if r.Check != nil {
+				opts.Log("        check: %s", r.Check.Summary())
+			}
 		}
 
 		// A link nobody is seeding never finishes, and meanwhile holds one
@@ -383,6 +408,7 @@ func fetchItem(service Downloader, item Item, st *state, opts DownloadOptions) D
 		errs   []string
 		client = &http.Client{}
 	)
+	var paths []string
 	for _, file := range item.Files {
 		result.Size += file.Size
 		path, err := localPath(opts.Dest, item, file)
@@ -390,6 +416,7 @@ func fetchItem(service Downloader, item Item, st *state, opts DownloadOptions) D
 			errs = append(errs, err.Error())
 			continue
 		}
+		paths = append(paths, path)
 		wg.Add(1)
 		slots <- struct{}{}
 		go func(file File, path string) {
@@ -418,12 +445,36 @@ func fetchItem(service Downloader, item Item, st *state, opts DownloadOptions) D
 	}
 	result.Status = DownloadDone
 	st.Done[hash] = true
+	delete(st.Rejected, hash) // a redo gets a fresh verdict
+	if opts.Check != nil {
+		verdict := opts.Check(paths)
+		result.Check = &verdict
+		if verdict.Status == VerdictRejected {
+			why := strings.Join(verdict.Reasons, "; ")
+			result.Status = DownloadRejected
+			delete(st.Done, hash)
+			st.Rejected[hash] = why
+			if moved, err := setAside(opts.Dest, paths); err != nil {
+				result.Note = why + "; could not move its files out of the folder: " + err.Error()
+			} else {
+				result.Note = why + "; files moved to " + moved
+			}
+		}
+	}
 	if err := st.save(); err != nil {
-		result.Note = "downloaded, but could not update the state file: " + err.Error()
+		result.Note = strings.TrimPrefix(result.Note+"; could not update the state file: "+err.Error(), "; ")
 	}
 
 	name := service.Name()
 	switch {
+	case result.Status == DownloadRejected && st.Added[hash]:
+		// Done with it either way; do not leave it holding a place.
+		if err := service.Remove(item); err == nil {
+			result.Removed = true
+			delete(st.Added, hash)
+			_ = st.save()
+		}
+	case result.Status == DownloadRejected:
 	case !opts.RemoveAfter:
 	case !st.Added[hash]:
 		result.Note = "left on " + name + ": it was already in your account"
@@ -439,6 +490,33 @@ func fetchItem(service Downloader, item Item, st *state, opts DownloadOptions) D
 		}
 	}
 	return result
+}
+
+// setAside moves an item's files from the download folder to RejectedDir,
+// keeping their layout, and tidies away the folders that leaves empty.
+func setAside(dest string, paths []string) (string, error) {
+	aside := RejectedDir(dest)
+	for _, path := range paths {
+		rel, err := filepath.Rel(dest, path)
+		if err != nil {
+			return aside, err
+		}
+		target := filepath.Join(aside, rel)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return aside, err
+		}
+		if err := os.Rename(path, target); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return aside, err
+		}
+		// Remove now-empty folders, innermost first; Remove refuses a folder
+		// that still holds something, which is exactly the stopping rule.
+		for dir := filepath.Dir(path); dir != dest && strings.HasPrefix(dir, dest); dir = filepath.Dir(dir) {
+			if os.Remove(dir) != nil {
+				break
+			}
+		}
+	}
+	return aside, nil
 }
 
 // localPath maps a file to a path under dest, refusing anything that would
