@@ -293,6 +293,11 @@ func unzip(archive string) (files []string, err error) {
 		if target == "" {
 			continue
 		}
+		// unpackTarget has already confined the name to dir. It is said
+		// again here, next to the write, in the plainest form there is.
+		if !strings.HasPrefix(target, strings.TrimSuffix(dir, string(filepath.Separator))+string(filepath.Separator)) && dir != "." {
+			continue
+		}
 		write, err := place(target, int64(entry.UncompressedSize64))
 		if err != nil {
 			return nil, err
@@ -311,14 +316,17 @@ func unzip(archive string) (files []string, err error) {
 }
 
 // unzipEntry writes one entry to target, giving up once it passes budget
-// bytes whatever size the entry claimed to be.
+// bytes whatever size the entry claimed to be. It writes beside the target
+// and renames, so a run killed half-way leaves no short file under the real
+// name for the next run to mistake for something else.
 func unzipEntry(entry *zip.File, target string, budget int64) (int64, error) {
 	in, err := entry.Open()
 	if err != nil {
 		return 0, err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	part := target + partSuffix
+	out, err := os.OpenFile(part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
 		return 0, err
 	}
@@ -328,6 +336,12 @@ func unzipEntry(entry *zip.File, target string, budget int64) (int64, error) {
 	}
 	if err == nil && n > budget {
 		err = errors.New("it unpacks to far more than its size")
+	}
+	if err == nil {
+		err = os.Rename(part, target)
+	}
+	if err != nil {
+		_ = os.Remove(part)
 	}
 	return n, err
 }

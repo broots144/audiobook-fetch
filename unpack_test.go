@@ -302,3 +302,22 @@ func TestUnpackARealSevenZipArchive(t *testing.T) {
 		t.Errorf("the folder holds %q", got)
 	}
 }
+
+func TestUnpackLeavesNoHalfWrittenFiles(t *testing.T) {
+	book := filepath.Join(t.TempDir(), "Book")
+	archive := makeZip(t, filepath.Join(book, "book.zip"), map[string]string{"01.mp3": "the whole file"})
+	// What a run killed half-way through an earlier unpack would have left.
+	if err := os.WriteFile(filepath.Join(book, "01.mp3.part"), []byte("the wh"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	files, _, notes := (&Unpacker{}).Unpack([]string{archive})
+	if len(files) != 1 || !strings.Contains(notes[0], "unpacked book.zip: 1 files") {
+		t.Fatalf("files %q, notes %q", files, notes)
+	}
+	if got := under(t, book); strings.Join(got, "|") != "01.mp3" {
+		t.Errorf("only the finished file should be there: %q", got)
+	}
+	if data, _ := os.ReadFile(filepath.Join(book, "01.mp3")); string(data) != "the whole file" {
+		t.Errorf("unpacked file holds %q", data)
+	}
+}

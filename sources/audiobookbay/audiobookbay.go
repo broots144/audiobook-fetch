@@ -26,6 +26,18 @@ func init() {
 // AUDIOBOOKBAY_URL to point somewhere else.
 const DefaultURL = "https://audiobookbay.lu"
 
+// browserUserAgent is what this source has always sent, and still does.
+//
+// Every other source is asked under the tool's own name (fetch.UserAgent).
+// This one was left alone: on 2026-11-14 two searches under the tool's own
+// name got no answer at all (a timeout, not a refusal), and it could not be
+// settled whether the site was down that day or does not answer clients
+// that are not browsers. Until someone has seen a search succeed under
+// fetch.UserAgent, changing it here risks breaking the source for nothing.
+// If you do see one succeed, delete this and the line in New that uses it.
+const browserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+	"(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
 var (
 	whitespace = regexp.MustCompile(`\s+`)
 	hashExact  = regexp.MustCompile(`^[a-fA-F0-9]{40}$`)
@@ -54,6 +66,7 @@ func New(cfg fetch.SourceConfig) (*Site, error) {
 	if v := os.Getenv("AUDIOBOOKBAY_URL"); v != "" {
 		base = v
 	}
+	fetcher.UserAgent = browserUserAgent
 	return &Site{BaseURL: strings.TrimRight(base, "/"), fetcher: fetcher}, nil
 }
 

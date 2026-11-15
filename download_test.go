@@ -2,6 +2,7 @@ package audiobookfetch
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -820,5 +821,70 @@ func TestAnArchiveThatCannotBeUnpackedIsKeptAndSaidSo(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(logged, "\n"), "could not unpack book.rar") {
 		t.Errorf("log: %q", logged)
+	}
+}
+
+func TestAnInterruptedRunStopsAtOnceAndLosesNothing(t *testing.T) {
+	f := newFakeService(t)
+	f.has(hashA, false, map[string]string{"A/a.mp3": "aaa"})
+	f.has(hashB, true, map[string]string{"B/b.mp3": "bbb"})
+	f.readyAfter[hashA] = -1 // the service never finishes fetching this one
+	opts := testOptions(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	opts.Context = ctx
+	waits := 0
+	opts.sleep = func(time.Duration) { waits++; cancel() } // Ctrl-C during the first wait
+	checked := 0
+	opts.Check = func([]string) Verdict { checked++; return Verdict{Status: VerdictOK} }
+	magnets := []Magnet{magnetFor(hashA), magnetFor(hashB)}
+
+	results, err := Download(f, magnets, opts)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("an interrupted run says so: %v", err)
+	}
+	if waits != 1 {
+		t.Errorf("it should stop at the first wait, not keep polling: %d waits", waits)
+	}
+	// What finished before the interruption is kept as done...
+	if r := results[1]; r.Status != DownloadDone || readFile(t, opts.Dest, "B", "b.mp3") != "bbb" || checked != 1 {
+		t.Errorf("the finished item: %+v", r)
+	}
+	// ...and what did not is neither failed nor given up on.
+	if r := results[0]; r.Status != DownloadNotReady || !strings.Contains(r.Note, "interrupted") {
+		t.Errorf("the unfinished item: %+v", r)
+	}
+
+	// Running again carries on: the finished item is not fetched twice, and
+	// the other one, now ready, arrives.
+	f.readyAfter[hashA] = 0
+	opts.Context, opts.sleep = context.Background(), func(time.Duration) {}
+	downloads := len(f.ranges)
+	results, err = Download(f, magnets, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Status != DownloadDone || results[0].Fetched != 1 || results[1].Fetched != 0 || len(f.ranges) != downloads+1 {
+		t.Errorf("second run: %+v, downloads %d -> %d", results, downloads, len(f.ranges))
+	}
+}
+
+func TestNothingIsStartedOnceInterrupted(t *testing.T) {
+	f := newFakeService(t)
+	f.has(hashA, true, map[string]string{"A/a.mp3": "aaa"})
+	opts := testOptions(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // stopped before the download half began
+	opts.Context = ctx
+	opts.Check = func([]string) Verdict {
+		t.Error("nothing may be checked on a run that was stopped")
+		return Verdict{Status: VerdictRejected, Reasons: []string{"half a look"}}
+	}
+
+	results, err := Download(f, []Magnet{magnetFor(hashA)}, opts)
+	if !errors.Is(err, context.Canceled) || results[0].Status != DownloadNotReady || len(f.ranges) != 0 {
+		t.Errorf("results %+v, err %v, %d downloads", results, err, len(f.ranges))
+	}
+	if _, statErr := os.Stat(filepath.Join(opts.Dest, "A", "a.mp3")); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("no file should have been written: %v", statErr)
 	}
 }

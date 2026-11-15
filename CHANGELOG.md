@@ -3,6 +3,20 @@
 Notable changes, newest first. Versions follow [semantic versioning](https://semver.org);
 before 1.0 the Go API may change between minor versions.
 
+## Unreleased
+
+- **Ctrl-C stops a run cleanly.** Downloads in flight stop at once and keep
+  what they have; an item already being checked is finished first. The tool
+  says how to carry on and exits with code 130. A second Ctrl-C stops it
+  dead. Library users get the same through a `Context` on
+  `DownloadOptions` and `SourceConfig`.
+- **The tool says who it is.** Sources are asked under the tool's own name
+  instead of a browser's. AudioBook Bay is the exception, left as it was
+  because a search under the new name could not be seen to work.
+- A run killed while unpacking a zip no longer leaves a half-written file
+  that blocks the next attempt, and the state is saved as soon as an
+  archive is unpacked.
+
 ## v0.1.0
 
 The first release.
