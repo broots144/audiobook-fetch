@@ -9,16 +9,20 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
+	"syscall"
 
 	fetch "github.com/broots144/audiobook-fetch"
 
@@ -56,7 +60,42 @@ func versionString() string {
 	return "(devel)"
 }
 
+// run is cancelled when the user asks the tool to stop (Ctrl-C, or a polite
+// kill). Every command hands it to the work it starts.
+var run = context.Background()
+
+// exitInterrupted is the conventional exit code for "stopped by Ctrl-C".
+const exitInterrupted = 130
+
+// interrupted reports that the user asked to stop, and says what that means.
+// It prints only once however often it is asked.
+func interrupted() bool {
+	if run.Err() == nil {
+		return false
+	}
+	saidStopped.Do(func() {
+		fmt.Fprintf(os.Stderr, "\nstopped. Nothing is lost: run the same command again to carry on where it left off.\n")
+	})
+	return true
+}
+
+var saidStopped sync.Once
+
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	run = ctx
+	go func() {
+		<-ctx.Done()
+		// Back to the default at once, so a second Ctrl-C stops the tool
+		// dead instead of waiting for the current step to finish.
+		stop()
+		fmt.Fprintf(os.Stderr, "\nstopping after the current step (press Ctrl-C again to stop right now)...\n")
+	}()
+	defer func() {
+		if interrupted() {
+			os.Exit(exitInterrupted)
+		}
+	}()
 	args := os.Args[1:]
 	command := "get"
 	if len(args) > 0 {
@@ -279,6 +318,9 @@ func cmdGet(args []string, cfg config) {
 		}
 		results, stoppedEarly = findBooks(books, reportDir, &search, *quiet)
 	}
+	if interrupted() {
+		return
+	}
 
 	seen := map[string]bool{}
 	var links []fetch.Magnet
@@ -306,11 +348,14 @@ func cmdGet(args []string, cfg config) {
 	for len(links) > 0 {
 		fmt.Fprintf(os.Stderr, "\ndownloading %d item(s) to %s\n", len(links), dest)
 		downloads, err := downloadLinks(links, &download, *quiet)
-		if err != nil {
-			fatal(err)
-		}
 		for _, d := range downloads {
 			byHash[d.Hash] = d
+		}
+		if interrupted() {
+			break // the report below still records what did arrive
+		}
+		if err != nil {
+			fatal(err)
 		}
 		links = nextBestLinks(results, byHash, seen, searchedAgain, &search)
 		if len(links) > 0 {

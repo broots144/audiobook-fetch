@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -1040,4 +1041,43 @@ func flagsFor(t *testing.T, dest string) *downloadFlags {
 		t.Fatal(err)
 	}
 	return &d
+}
+
+// stopped makes the commands behave as if Ctrl-C had been pressed, for the
+// length of one test.
+func stopped(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	before := run
+	run, saidStopped = ctx, sync.Once{}
+	t.Cleanup(func() { run, saidStopped = before, sync.Once{} })
+}
+
+func TestAStoppedRunDoesNoMoreWork(t *testing.T) {
+	home := sandbox(t)
+	dest := filepath.Join(home, "library")
+	list := write(t, filepath.Join(home, "books.txt"), "Frankenstein | Mary Shelley\nDracula | Bram Stoker\n"+magnet(hashB)+"\n")
+	t.Setenv("FAKEBOX_API_KEY", "k")
+	stopped(t)
+
+	_, stderr := capture(t, func() { cmdGet([]string{list, dest, "-poll", "1ms", "-delay", "0"}, testConfig()) })
+	if site.searches != 0 || len(box.added) != 0 {
+		t.Errorf("a stopped run searches for nothing and downloads nothing: %d searches, added %v", site.searches, box.added)
+	}
+	if strings.Count(stderr, "run the same command again to carry on") != 1 {
+		t.Errorf("it should say once how to carry on:\n%s", stderr)
+	}
+	// A lookup that never happened leaves no row behind to be mistaken for "not found".
+	if rows := report(t, fetch.BookkeepingDir(dest)); len(rows) != 0 {
+		t.Errorf("report: %v", rows)
+	}
+
+	// The download half on its own: links are left for the next run.
+	links := write(t, filepath.Join(home, "magnets.txt"), magnet(hashA)+"\n")
+	var results []fetch.DownloadResult
+	capture(t, func() { results, _ = downloadLinks(mustMagnets(t, read(t, links)), flagsFor(t, dest), true) })
+	if len(box.added) != 0 || exists(dest, "Frankenstein") {
+		t.Errorf("nothing should be fetched: added %v, results %+v", box.added, results)
+	}
 }

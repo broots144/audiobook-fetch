@@ -2,6 +2,7 @@ package audiobookfetch
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +33,9 @@ type Source interface {
 type SourceConfig struct {
 	Delay time.Duration // pause between requests
 	Proxy string        // optional proxy for the source's requests
+	// Context, when set, stops the source's requests and waits when it is
+	// cancelled (Ctrl-C, say).
+	Context context.Context
 }
 
 // SourceFactory creates a source.
@@ -63,8 +67,9 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-const fetcherUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-	"(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+// UserAgent is how the tool introduces itself to the sites it reads: by its
+// own name, with where to find out what it is.
+const UserAgent = AppName + " (+https://github.com/broots144/audiobook-fetch)"
 
 // maxPageBytes caps how much of one answer is read, so a source that
 // misbehaves cannot fill memory.
@@ -76,13 +81,18 @@ type Fetcher struct {
 	Delay   time.Duration
 	Retries int
 	HTTP    *http.Client
+	// UserAgent is sent with every request; NewFetcher sets it to UserAgent.
+	UserAgent string
+	// Context stops requests and waits when cancelled; nil never does.
+	Context context.Context
 
 	last time.Time
 }
 
 // NewFetcher returns a Fetcher set up from a source's config.
 func NewFetcher(cfg SourceConfig) (*Fetcher, error) {
-	f := &Fetcher{Delay: cfg.Delay, Retries: 2, HTTP: &http.Client{Timeout: 30 * time.Second}}
+	f := &Fetcher{Delay: cfg.Delay, Retries: 2, HTTP: &http.Client{Timeout: 30 * time.Second},
+		UserAgent: UserAgent, Context: cfg.Context}
 	if cfg.Proxy != "" {
 		proxy, err := url.Parse(cfg.Proxy)
 		if err != nil || proxy.Host == "" {
@@ -114,19 +124,39 @@ func (f *Fetcher) do(target string, payload []byte) (string, error) {
 			return body, nil
 		}
 		lastErr = err
-		if !retry {
+		if !retry || f.context().Err() != nil {
 			break
 		}
 		if attempt < f.Retries {
-			time.Sleep(min(60*time.Second, 5*time.Second<<attempt))
+			f.sleep(min(60*time.Second, 5*time.Second<<attempt))
 		}
 	}
 	return "", fmt.Errorf("%s: %w", target, lastErr)
 }
 
+func (f *Fetcher) context() context.Context {
+	if f.Context == nil {
+		return context.Background()
+	}
+	return f.Context
+}
+
+// sleep waits for d, or until the fetcher is told to stop.
+func (f *Fetcher) sleep(d time.Duration) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-f.context().Done():
+	}
+}
+
 func (f *Fetcher) once(target string, payload []byte) (body string, retry bool, err error) {
 	if wait := f.Delay - time.Since(f.last); wait > 0 {
-		time.Sleep(wait)
+		f.sleep(wait)
+	}
+	if err := f.context().Err(); err != nil {
+		return "", false, err
 	}
 	f.last = time.Now()
 
@@ -134,11 +164,11 @@ func (f *Fetcher) once(target string, payload []byte) (body string, retry bool, 
 	if payload != nil {
 		method, content = http.MethodPost, bytes.NewReader(payload)
 	}
-	req, err := http.NewRequest(method, target, content)
+	req, err := http.NewRequestWithContext(f.context(), method, target, content)
 	if err != nil {
 		return "", false, err
 	}
-	req.Header.Set("User-Agent", fetcherUserAgent)
+	req.Header.Set("User-Agent", f.UserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")

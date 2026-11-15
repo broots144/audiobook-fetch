@@ -49,7 +49,13 @@ type DownloadOptions struct {
 	// Check, when set, examines each item's files once they are all here.
 	// An item it rejects is moved out of the folder (see RejectedDir) and
 	// reported as rejected instead of downloaded.
-	Check func(paths []string) Verdict
+	// Context, when set, lets a run be stopped from outside (Ctrl-C, say).
+	// Downloads in flight stop at once and keep what they have for the
+	// next run; an item already being checked is finished first, so that
+	// nothing is judged on half a look. Download then returns the results
+	// so far together with the context's error.
+	Context context.Context
+	Check   func(paths []string) Verdict
 	// Unpack, when set, opens archives among an item's files before they
 	// are checked, and deletes the ones that unpacked whole.
 	Unpack *Unpacker
@@ -157,8 +163,19 @@ func Download(service Downloader, magnets []Magnet, opts DownloadOptions) ([]Dow
 	if opts.OnBytes == nil {
 		opts.OnBytes = func(int64) {}
 	}
+	if opts.Context == nil {
+		opts.Context = context.Background()
+	}
+	ctx := opts.Context
 	if opts.sleep == nil {
-		opts.sleep = time.Sleep
+		opts.sleep = func(d time.Duration) { // a wait that an interruption cuts short
+			timer := time.NewTimer(d)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+			}
+		}
 	}
 	if opts.now == nil {
 		opts.now = time.Now
@@ -245,6 +262,9 @@ func Download(service Downloader, magnets []Magnet, opts DownloadOptions) ([]Dow
 	deadline := opts.now().Add(opts.Wait)
 	watch := map[string]progressMark{}
 	for refresh := addedAny; len(pending) > 0; refresh = true {
+		if ctx.Err() != nil {
+			break
+		}
 		if refresh {
 			if account, err = service.List(); err != nil {
 				return results, err
@@ -258,6 +278,9 @@ func Download(service Downloader, magnets []Magnet, opts DownloadOptions) ([]Dow
 			item, ok := present[m.Hash]
 			if !ok || !item.Ready || len(item.Files) == 0 {
 				continue
+			}
+			if ctx.Err() != nil {
+				break // asked to stop: start nothing new
 			}
 			delete(pending, i)
 			results[i] = fetchItem(service, item, st, opts)
@@ -353,6 +376,16 @@ func Download(service Downloader, magnets []Magnet, opts DownloadOptions) ([]Dow
 		opts.Log("waiting on %s for %d item(s): %d being fetched, %d stalled, %d queued",
 			name, len(pending), fetching, stalled, len(queued))
 		opts.sleep(opts.Poll)
+	}
+	if ctx.Err() != nil {
+		// Whatever was not finished is simply not here yet; nothing about
+		// it is recorded, so the next run takes it up again.
+		for i := range magnets {
+			if results[i].Status == "" {
+				results[i].Status, results[i].Note = DownloadNotReady, "interrupted; run again to carry on"
+			}
+		}
+		return results, ctx.Err()
 	}
 	return results, nil
 }
@@ -471,6 +504,11 @@ func fetchItem(service Downloader, item Item, st *state, opts DownloadOptions) D
 	}
 	wg.Wait()
 
+	if opts.Context.Err() != nil {
+		// Stopped part-way: not a failure, and not to be unpacked or checked.
+		result.Status, result.Note = DownloadNotReady, "interrupted; run again to carry on"
+		return result
+	}
 	if len(errs) > 0 {
 		result.Status = DownloadFailed
 		result.Note = fmt.Sprintf("%d of %d files failed; first: %s", len(errs), len(item.Files), errs[0])
@@ -495,6 +533,9 @@ func fetchItem(service Downloader, item Item, st *state, opts DownloadOptions) D
 			}
 		}
 		paths = files
+		// The archives are gone from this moment, so say so now: a run cut
+		// short during the check must not download them again.
+		_ = st.save()
 	}
 	if opts.Check != nil {
 		verdict := opts.Check(paths)
@@ -671,13 +712,16 @@ func fetchFile(service Downloader, client *http.Client, item Item, file File, pa
 		var link string
 		if link, err = service.Link(item, file); err == nil {
 			var n int64
-			n, err = fetchTo(client, link, path+partSuffix, file.Size, opts.Idle, opts.OnBytes)
+			n, err = fetchTo(opts.Context, client, link, path+partSuffix, file.Size, opts.Idle, opts.OnBytes)
 			written += n
 			if err == nil {
 				if err = os.Rename(path+partSuffix, path); err == nil {
 					return written, true, nil
 				}
 			}
+		}
+		if opts.Context.Err() != nil {
+			break
 		}
 		if attempt < fileAttempts {
 			opts.sleep(time.Duration(attempt) * 5 * time.Second)
@@ -688,7 +732,7 @@ func fetchFile(service Downloader, client *http.Client, item Item, file File, pa
 
 // fetchTo downloads link into part, continuing from whatever part already
 // holds, and checks the result is exactly want bytes long.
-func fetchTo(client *http.Client, link, part string, want int64, idle time.Duration, onBytes func(int64)) (written int64, err error) {
+func fetchTo(parent context.Context, client *http.Client, link, part string, want int64, idle time.Duration, onBytes func(int64)) (written int64, err error) {
 	var have int64
 	if info, statErr := os.Stat(part); statErr == nil {
 		have = info.Size()
@@ -704,7 +748,7 @@ func fetchTo(client *http.Client, link, part string, want int64, idle time.Durat
 	}
 
 	// One stalled connection must not hang the whole run.
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	if idle <= 0 {
 		idle = 90 * time.Second
@@ -757,7 +801,7 @@ func fetchTo(client *http.Client, link, part string, want int64, idle time.Durat
 		}
 		if readErr != nil {
 			out.Close()
-			if errors.Is(readErr, context.Canceled) {
+			if errors.Is(readErr, context.Canceled) && parent.Err() == nil {
 				readErr = fmt.Errorf("connection stalled for %s", idle)
 			}
 			return written, readErr

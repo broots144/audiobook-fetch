@@ -52,7 +52,7 @@ func (s *searchFlags) finish() error {
 		if name = strings.TrimSpace(name); name == "" {
 			continue
 		}
-		source, err := fetch.NewSource(name, fetch.SourceConfig{Delay: s.delay, Proxy: s.proxy})
+		source, err := fetch.NewSource(name, fetch.SourceConfig{Delay: s.delay, Proxy: s.proxy, Context: run})
 		if err != nil {
 			return err
 		}
@@ -99,7 +99,7 @@ func cmdFind(args []string, cfg config) {
 		enc.SetEscapeHTML(false)
 		_ = enc.Encode(results)
 	}
-	if stoppedEarly {
+	if stoppedEarly && !interrupted() {
 		os.Exit(1)
 	}
 }
@@ -119,9 +119,15 @@ func findBooks(books []fetch.Wanted, dir string, s *searchFlags, quiet bool) (re
 	start := time.Now()
 	failures := 0
 	for i, w := range books {
+		if run.Err() != nil {
+			break
+		}
 		r, reused := previous[w.Raw]
 		if !reused {
 			r = fetch.Find(w, s.sources, s.opts)
+		}
+		if run.Err() != nil {
+			break // a lookup cut short says nothing about the book: keep no result for it
 		}
 		if r.Status == fetch.StatusError {
 			failures++

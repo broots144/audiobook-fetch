@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -79,7 +81,7 @@ func cmdDownload(args []string, cfg config) {
 		fmt.Fprintf(os.Stderr, "ignored %d line(s) that are not magnet links\n", bad)
 	}
 	results, err := downloadLinks(magnets, &download, *quiet)
-	if err != nil {
+	if err != nil && !interrupted() {
 		fatal(err)
 	}
 	if *printJSON {
@@ -114,7 +116,7 @@ func downloadLinks(magnets []fetch.Magnet, d *downloadFlags, quiet bool) ([]fetc
 		name    string
 		magnets []fetch.Magnet
 	}{{"archive", direct}, {d.name, rest}} {
-		if len(group.magnets) == 0 {
+		if len(group.magnets) == 0 || run.Err() != nil {
 			continue
 		}
 		got, err := downloadWith(group.name, group.magnets, d, quiet)
@@ -142,6 +144,7 @@ func downloadWith(name string, magnets []fetch.Magnet, d *downloadFlags, quiet b
 		}
 	}
 	opts := d.opts
+	opts.Context = run
 	if d.unpack {
 		opts.Unpack = fetch.NewUnpacker()
 		for _, gap := range opts.Unpack.Missing() {
@@ -168,9 +171,10 @@ func downloadWith(name string, magnets []fetch.Magnet, d *downloadFlags, quiet b
 
 	start := time.Now()
 	results, err := fetch.Download(service, magnets, opts)
-	if err != nil {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		return results, err
 	}
+	stopped := err // interrupted or not, the summary below says what did get done
 
 	counts := map[string]int{}
 	var files, fetched, removed, flagged, repeats int
@@ -219,7 +223,7 @@ func downloadWith(name string, magnets []fetch.Magnet, d *downloadFlags, quiet b
 	if counts[fetch.DownloadNotReady] > 0 {
 		fmt.Fprintf(os.Stderr, "run the same command again later to collect what %s is still fetching\n", service.Name())
 	}
-	return results, nil
+	return results, stopped
 }
 
 // showThroughput prints a line every half minute while data is arriving, so
