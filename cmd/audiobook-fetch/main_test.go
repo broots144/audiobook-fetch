@@ -161,11 +161,11 @@ func init() {
 // sees none of the machine's real config, key, or audio tools.
 func sandbox(t *testing.T) (home string) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("the stand-in ffprobe is a shell script")
-	}
 	home = t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // where Windows looks for the home folder
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("WHISPER_MODEL", "")
 	t.Setenv("FAKEBOX_API_KEY", "")
 
@@ -178,7 +178,15 @@ case "$last" in
 *) echo '{"streams":[{"codec_name":"mp3","codec_type":"audio"}],"format":{"duration":"3600.0","bit_rate":"64000"}}' ;;
 esac
 `
-	if err := os.WriteFile(filepath.Join(tools, "ffprobe"), []byte(script), 0o755); err != nil {
+	name := "ffprobe"
+	if runtime.GOOS == "windows" {
+		// The same stand-in as a batch file: the last argument is the file.
+		name, script = "ffprobe.bat", "@echo off\r\nset last=\r\n:next\r\nif \"%~1\"==\"\" goto done\r\nset last=%~1\r\nshift\r\ngoto next\r\n:done\r\n"+
+			"if /I \"%last:~-4%\"==\".m4b\" goto m4b\r\n"+
+			`echo {"streams":[{"codec_name":"mp3","codec_type":"audio"}],"format":{"duration":"3600.0","bit_rate":"64000"}}`+"\r\ngoto :eof\r\n:m4b\r\n"+
+			`echo {"streams":[{"codec_name":"aac","codec_type":"audio"}],"format":{"duration":"7200.0","bit_rate":"64000"}}`+"\r\n"
+	}
+	if err := os.WriteFile(filepath.Join(tools, name), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", tools)
@@ -307,7 +315,7 @@ func TestDestinationPrefersTheCommandLine(t *testing.T) {
 
 func TestReadKey(t *testing.T) {
 	home := sandbox(t)
-	keyFile := filepath.Join(home, ".config", fetch.AppName, "fakebox.key")
+	keyFile := filepath.Join(configDir(), "fakebox.key")
 
 	if _, err := readKey("fakebox", ""); err == nil || !strings.Contains(err.Error(), "FAKEBOX_API_KEY") || !strings.Contains(err.Error(), keyFile) {
 		t.Errorf("a missing key should name the variable and the file: %v", err)
@@ -325,17 +333,20 @@ func TestReadKey(t *testing.T) {
 		t.Errorf("key file: %q, warning %q", key, warned)
 	}
 
-	// A key other users can read is used, but not silently.
-	loose := write(t, filepath.Join(home, "loose.key"), "loose-key")
-	if err := os.Chmod(loose, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, warned = capture(t, func() { key, _ = readKey("fakebox", loose) })
-	if key != "loose-key" || !strings.Contains(warned, "chmod 600") {
-		t.Errorf("loose key file: %q, warning %q", key, warned)
-	}
-	if strings.Contains(warned, "loose-key") {
-		t.Errorf("the warning must not show the key: %q", warned)
+	// A key other users can read is used, but not silently. (Windows keeps
+	// permissions another way, so there is nothing to warn about there.)
+	if runtime.GOOS != "windows" {
+		loose := write(t, filepath.Join(home, "loose.key"), "loose-key")
+		if err := os.Chmod(loose, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, warned = capture(t, func() { key, _ = readKey("fakebox", loose) })
+		if key != "loose-key" || !strings.Contains(warned, "chmod 600") {
+			t.Errorf("loose key file: %q, warning %q", key, warned)
+		}
+		if strings.Contains(warned, "loose-key") {
+			t.Errorf("the warning must not show the key: %q", warned)
+		}
 	}
 
 	t.Setenv("FAKEBOX_API_KEY", " from-env ")
@@ -345,13 +356,13 @@ func TestReadKey(t *testing.T) {
 }
 
 func TestLoadConfig(t *testing.T) {
-	home := sandbox(t)
+	sandbox(t)
 	cfg := loadConfig()
 	if cfg.Downloader != defaultDownloader || strings.Join(cfg.Sources, ",") != strings.Join(defaultSources, ",") || cfg.Check != nil {
 		t.Errorf("with no config file the defaults apply: %+v", cfg)
 	}
 
-	path := filepath.Join(home, ".config", fetch.AppName, "config.json")
+	path := filepath.Join(configDir(), "config.json")
 	write(t, path, `{"to": "/books", "remove_after": true, "sources": [], "check": false, "whisper_model": "/m.bin"}`)
 	cfg = loadConfig()
 	if cfg.To != "/books" || !cfg.RemoveAfter || cfg.Check == nil || *cfg.Check || cfg.WhisperModel != "/m.bin" {
@@ -375,11 +386,11 @@ func TestLoadConfig(t *testing.T) {
 }
 
 func TestDefaultModelLooksInTheConfigFolder(t *testing.T) {
-	home := sandbox(t)
+	sandbox(t)
 	if got := defaultModel(config{}); got != "" {
 		t.Errorf("no model anywhere, got %q", got)
 	}
-	found := write(t, filepath.Join(home, ".config", fetch.AppName, "models", "ggml-base.bin"), "model")
+	found := write(t, filepath.Join(configDir(), "models", "ggml-base.bin"), "model")
 	if got := defaultModel(config{}); got != found {
 		t.Errorf("a model in the config folder is found, got %q", got)
 	}
@@ -925,7 +936,7 @@ func TestDoctorSaysWhatIsMissingAndHowToFixIt(t *testing.T) {
 	// With a key the service accepts, a folder and a config, it is ready,
 	// and the key itself is never shown.
 	t.Setenv("FAKEBOX_API_KEY", "the-secret-key")
-	write(t, filepath.Join(home, ".config", fetch.AppName, "config.json"), "{}")
+	write(t, filepath.Join(configDir(), "config.json"), "{}")
 	cfg := testConfig()
 	cfg.To = home
 	out.Reset()
@@ -1079,5 +1090,26 @@ func TestAStoppedRunDoesNoMoreWork(t *testing.T) {
 	capture(t, func() { results, _ = downloadLinks(mustMagnets(t, read(t, links)), flagsFor(t, dest), true) })
 	if len(box.added) != 0 || exists(dest, "Frankenstein") {
 		t.Errorf("nothing should be fetched: added %v, results %+v", box.added, results)
+	}
+}
+
+func TestConfigDirFollowsThePlatform(t *testing.T) {
+	home := sandbox(t)
+	want := filepath.Join(home, ".config", fetch.AppName)
+	if runtime.GOOS == "windows" {
+		want = filepath.Join(home, "AppData", "Roaming", fetch.AppName)
+	}
+	if got := configDir(); got != want {
+		t.Errorf("config folder %q, want %q", got, want)
+	}
+	// XDG_CONFIG_HOME wins everywhere, when it is a real path.
+	elsewhere := filepath.Join(home, "xdg")
+	t.Setenv("XDG_CONFIG_HOME", elsewhere)
+	if got := configDir(); got != filepath.Join(elsewhere, fetch.AppName) {
+		t.Errorf("with XDG_CONFIG_HOME: %q", got)
+	}
+	t.Setenv("XDG_CONFIG_HOME", "not/absolute")
+	if got := configDir(); got != want {
+		t.Errorf("a relative XDG_CONFIG_HOME is ignored: %q", got)
 	}
 }

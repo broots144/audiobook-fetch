@@ -182,7 +182,19 @@ type config struct {
 	KeepOneFormat *bool `json:"keep_one_format"`
 }
 
+// configDir is where the config file, the key files and the whisper models
+// live: $XDG_CONFIG_HOME/audiobook-fetch if that is set, %AppData%\audiobook-fetch
+// on Windows, and ~/.config/audiobook-fetch everywhere else (macOS included,
+// where that is where command-line tools are usually looked for).
 func configDir() string {
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" && filepath.IsAbs(dir) {
+		return filepath.Join(dir, fetch.AppName)
+	}
+	if runtime.GOOS == "windows" {
+		if dir, err := os.UserConfigDir(); err == nil {
+			return filepath.Join(dir, fetch.AppName)
+		}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "." + fetch.AppName
