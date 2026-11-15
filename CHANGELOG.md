@@ -3,7 +3,7 @@
 Notable changes, newest first. Versions follow [semantic versioning](https://semver.org);
 before 1.0 the Go API may change between minor versions.
 
-## Unreleased
+## v0.2.0
 
 - **Ctrl-C stops a run cleanly.** Downloads in flight stop at once and keep
   what they have; an item already being checked is finished first. The tool
