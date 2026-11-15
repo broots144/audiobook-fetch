@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+<rect width="1280" height="640" fill="#0d1117"/>
+<g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<text x="80" y="150" font-size="76" font-weight="700" fill="#e6edf3">audiobook-fetch</text>
+<text x="80" y="218" font-size="34" fill="#c9d1d9">A list of audiobooks in. Checked files in a folder out.</text>
+<text x="80" y="268" font-size="26" fill="#8b949e">Finds each book, downloads it, unpacks it, and listens to make sure it is the right one.</text>
+</g>
+<rect x="80" y="318" width="1120" height="226" rx="14" fill="#161b22" stroke="#30363d"/>
+<circle cx="110" cy="346" r="7" fill="#ff5f57"/><circle cx="134" cy="346" r="7" fill="#febc2e"/><circle cx="158" cy="346" r="7" fill="#28c840"/>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="25">
+<text x="112" y="402" fill="#8b949e">$ audiobook-fetch books.txt ~/audiobooks</text>
+<text x="112" y="440" fill="#e6edf3">[1/1] <tspan fill="#3fb950">✓ 1.00</tspan>  The Raven | Edgar Allan Poe</text>
+<text x="112" y="478" fill="#c9d1d9">[1/1] downloaded: 4 files, 13.3 MB</text>
+<text x="112" y="516" fill="#c9d1d9">      check: <tspan fill="#3fb950">ok</tspan> | 0.3 h, 97 kbps | spoken language en</text>
+</g>
+<g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="24" fill="#8b949e">
+<text x="80" y="594">Public-domain books need no account  ·  macOS, Linux, Windows  ·  MIT</text>
+</g>
+</svg>
