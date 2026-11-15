@@ -12,6 +12,8 @@ are few.
 - **No secrets, no personal data.** Never put an API key, a real download
   list, or output from your own library in an issue, a commit or a test.
 - **Security problems go in private.** See [SECURITY.md](SECURITY.md).
+- **Be civil.** The [code of conduct](CODE_OF_CONDUCT.md) is short.
+- **Questions go in [Discussions](https://github.com/broots144/audiobook-fetch/discussions)**, bugs in Issues.
 
 ## Getting set up
 

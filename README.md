@@ -63,6 +63,20 @@ downloading 1 item(s) to /home/you/audiobooks
 The score (0 to 1) is how sure the match is; the `check:` line is what
 listening to the files found.
 
+## What it is not
+
+- **Not a library server or a player.** It puts checked files in a folder
+  and stops. Something like [Audiobookshelf](https://www.audiobookshelf.org)
+  or Plex is what serves and plays them; point it at the same folder.
+- **Not a Readarr replacement.** Readarr, [retired in
+  2025](https://github.com/Readarr/Readarr), was a server that watched
+  authors and grabbed new releases as they appeared. This is a command you
+  run with a list: no server, no database, nothing to keep running. It does
+  not watch for new books. What it does that Readarr did not is listen to
+  what arrived and throw out what is not the book.
+- **Not a torrent client.** It never joins a swarm. Links are handed to a
+  downloader, which gives back plain files over HTTPS.
+
 ## Quick start
 
 1. **Install it.** With Homebrew, on macOS or Linux:
@@ -122,7 +136,9 @@ rar and 7z, install one of `7zz`, `7z`, `unar` or `bsdtar` (macOS has
 - [What it does with a download](#what-it-does-with-a-download), and in full: [docs/behaviour.md](docs/behaviour.md)
 - [The parts on their own](#the-parts-on-their-own): `find`, `download`, `check`, `tidy`, `doctor`
 - [Extending](docs/extending.md): the source and downloader plugins, and use from Go
-- [Contributing](CONTRIBUTING.md), [security](SECURITY.md), [changelog](CHANGELOG.md), [license](#license)
+- [What it is not](#what-it-is-not)
+- [Contributing](CONTRIBUTING.md), [code of conduct](CODE_OF_CONDUCT.md), [security](SECURITY.md), [changelog](CHANGELOG.md), [license](#license)
+- Questions and ideas: [Discussions](https://github.com/broots144/audiobook-fetch/discussions)
 
 ## The list
 
