@@ -321,3 +321,17 @@ func TestUnpackLeavesNoHalfWrittenFiles(t *testing.T) {
 		t.Errorf("unpacked file holds %q", data)
 	}
 }
+
+func TestUnpackAnArchiveNamedWithoutAFolder(t *testing.T) {
+	// "book.zip" on its own is in the current folder, which a joined path
+	// does not spell out; the check that paths stay inside must allow for it.
+	t.Chdir(t.TempDir())
+	makeZip(t, "book.zip", map[string]string{"Book/01.mp3": "one", "../escaped.mp3": "two"})
+	files, _, notes := (&Unpacker{}).Unpack([]string{"book.zip"})
+	if len(files) != 2 || !strings.Contains(notes[0], "unpacked book.zip: 2 files") {
+		t.Fatalf("files %q, notes %q", files, notes)
+	}
+	if got := under(t, "."); strings.Join(got, "|") != "Book/01.mp3|escaped.mp3" {
+		t.Errorf("the folder holds %q", got)
+	}
+}

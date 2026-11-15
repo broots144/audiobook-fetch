@@ -282,6 +282,12 @@ func unzip(archive string) (files []string, err error) {
 		}
 	}()
 	dir := filepath.Dir(archive)
+	// Every path written must start with this: the folder and a separator.
+	// (An archive named without a folder is in ".", which Join leaves off.)
+	inside := strings.TrimSuffix(dir, string(filepath.Separator)) + string(filepath.Separator)
+	if dir == "." {
+		inside = ""
+	}
 	for _, entry := range reader.File {
 		if !entry.Mode().IsRegular() { // folders, links, devices
 			continue
@@ -295,7 +301,7 @@ func unzip(archive string) (files []string, err error) {
 		}
 		// unpackTarget has already confined the name to dir. It is said
 		// again here, next to the write, in the plainest form there is.
-		if !strings.HasPrefix(target, strings.TrimSuffix(dir, string(filepath.Separator))+string(filepath.Separator)) && dir != "." {
+		if !strings.HasPrefix(target, inside) {
 			continue
 		}
 		write, err := place(target, int64(entry.UncompressedSize64))
