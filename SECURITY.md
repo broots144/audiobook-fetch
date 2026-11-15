@@ -52,7 +52,10 @@ provenance: `gh attestation verify <file> --repo broots144/audiobook-fetch`.
 
 **The network.** The tool talks to the sources you enable, to the
 downloader, and to the download links the downloader hands back. Searches go
-through `-search-proxy` if you set one; downloads never do. Nothing else is
+through `-search-proxy` if you set one; downloads never do. Sources are
+asked under the tool's own name (`audiobook-fetch`, with a link to this
+repository), not a browser's. AudioBook Bay is the exception, for the
+reason given where the value is set in `sources/audiobookbay`. Nothing else is
 contacted and nothing is reported anywhere.
 
 ## What it does not do

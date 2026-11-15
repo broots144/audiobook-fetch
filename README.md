@@ -32,11 +32,16 @@ needs a [TorBox](https://torbox.app) account to download through; `find`,
 **Built from plugins.** Where it searches (a *source*) and what fetches the
 links (a *downloader*) are both small plugins behind a Go interface. Four
 sources and two downloaders ship with it, and adding your own is one
-package: see [Extending](#extending).
+package: see [Extending](docs/extending.md).
 
 ## What a run looks like
 
 A public-domain book, on a machine with no account and no config:
+
+![A terminal: one command finds The Raven, downloads four files and reports the audio check as ok](docs/demo.svg)
+
+<details>
+<summary>The same run as text</summary>
 
 ```console
 $ echo "The Raven | Edgar Allan Poe" > books.txt
@@ -52,6 +57,8 @@ downloading 1 item(s) to /home/you/audiobooks
 
 1 links: 1 downloaded, 0 no seeds, 0 not ready yet, 0 stalled, 0 skipped (not cached), 0 failed
 ```
+
+</details>
 
 The score (0 to 1) is how sure the match is; the `check:` line is what
 listening to the files found.
@@ -102,7 +109,7 @@ and the optional programs, and says how to fix whatever is missing.
 Homebrew and most package managers) and put a whisper.cpp model such as
 [`ggml-base.bin`](https://huggingface.co/ggerganov/whisper.cpp/tree/main)
 (about 150 MB) in `~/.config/audiobook-fetch/models/`. Each download's
-audio is then [checked](#checking-what-came-down): playable, spoken language,
+audio is then [checked](docs/behaviour.md#checking-what-came-down): playable, spoken language,
 abridged or dramatized. Zip archives are unpacked without anything extra; for
 rar and 7z, install one of `7zz`, `7z`, `unar` or `bsdtar` (macOS has
 `bsdtar` already).
@@ -112,9 +119,9 @@ rar and 7z, install one of `7zz`, `7z`, `unar` or `bsdtar` (macOS has
 - [The list](#the-list): what a line can look like
 - [What happens](#what-happens) and [how it picks](#how-it-picks)
 - [Options](#options) and the [config file](#config-file)
-- [Behaviour in detail](#behaviour-in-detail): queues, dead links, archives, the audio check, duplicate formats, sources
+- [What it does with a download](#what-it-does-with-a-download), and in full: [docs/behaviour.md](docs/behaviour.md)
 - [The parts on their own](#the-parts-on-their-own): `find`, `download`, `check`, `tidy`, `doctor`
-- [Extending](#extending): the source and downloader plugins, and [use from Go](#use-from-go)
+- [Extending](docs/extending.md): the source and downloader plugins, and use from Go
 - [Contributing](CONTRIBUTING.md), [security](SECURITY.md), [changelog](CHANGELOG.md), [license](#license)
 
 ## The list
@@ -222,133 +229,29 @@ To avoid typing the folder and options every time, create
 Every key is optional. With `to` set, `audiobook-fetch books.txt` is the
 whole command.
 
-## Behaviour in detail
+The config folder is `~/.config/audiobook-fetch` on macOS and Linux and
+`%AppData%\audiobook-fetch` on Windows; `XDG_CONFIG_HOME` is honoured when
+set. Key files and whisper models live in the same folder. The tool is
+tested on all three systems.
 
-### Removing from the downloader
+## What it does with a download
 
-**`-remove-after`** only ever removes items this tool added, and only once
-every file of the item is on disk. Anything that was already in your account
-is left alone, even if it matches a link in the list.
+Each of these is on by default and explained in full in
+[docs/behaviour.md](docs/behaviour.md):
 
-### Queues
-
-Some accounts may only fetch a few links at once and queue the
-rest. The tool starts queued links itself as slots free up.
-
-### Links with no seeds
-
-A link nobody is seeding never finishes, and holds
-one of those slots while it sits there. Once the downloader has made no
-progress on a link for `-stall-after`, the tool gives up on it, reports it as
-*no seeds*, and removes it from the downloader (if this tool added it) so the
-next link can start. When the link came from a search, the tool then tries
-the book's next-best listing, as long as that one also counts as a match and
-has nothing against it (an abridged or dramatized edition is never used as a
-fallback), and keeps going until one downloads or none are left. Those
-fallbacks are noted during the search, so trying them needs no further searching. If a book runs
-out of listings that way, the sources its dead listing did not come from are
-searched once more before the tool gives up on it.
-
-### Archives
-
-Some downloads wrap the whole book in a `.zip`, `.rar` or `.7z`. Once such an
-item is here, each archive is unpacked into the folder it is in and then
-**deleted**, so the check (and your player) sees the audio and not a box.
-
-- Zip is handled by the tool itself. Rar and 7z are handed to the first of
-  `7zz`, `7z`, `unar` or `bsdtar` that is installed; multi-part rars are
-  unpacked from their first piece and all the pieces deleted.
-- An archive is deleted only when everything in it came out. One that cannot
-  be unpacked (no program for it, a password, damage, or it would overwrite a
-  different file already there) is left exactly as it was and the tool says
-  why. A book still in its archive is reported as *unchecked*, never rejected.
-- Nothing in an archive can be written outside the folder the archive is in,
-  and one that unpacks to far more than its own size is refused.
-
-`-unpack=false` leaves archives alone.
-
-### Checking what came down
-
-A listing's description is only a claim, so once
-an item's files are here the audio itself is examined:
-
-- *Does it play, and how good is it?* `ffprobe` (part of ffmpeg) reads every
-  audio file for its length, bitrate and codec.
-- *What language is spoken?* `whisper-cli`
-  ([whisper.cpp](https://github.com/ggerganov/whisper.cpp)) listens to three
-  half-minute samples spread through the book.
-- *Is it the plain, full reading?* File names, tags and the first two minutes
-  are searched for words like "abridged", "dramatized" and "full cast".
-
-A download with no audio files, none that play, or most samples in another
-language than `-lang` is **rejected**: its files are moved to
-`.audiobook-fetch/rejected/` inside the download folder (nothing is deleted),
-it is removed from the downloader if this tool added it, and it is not fetched
-again on later runs unless `-redo` is given. When the link came from a search,
-the book's next-best listing is tried, as for a link with no seeds. Lesser
-doubts (low bitrate, some unplayable files, an edition word, one odd language
-sample) only **flag** the download; it is kept and the `check:` line says why.
-
-### The same book in several formats
-
-Some downloads hold the whole book two or three times: once as an M4B, again
-as a folder of MP3s. The check notices when all the files of one format run,
-in total, as long as all the files of another (to within 2%), keeps the best
-one, and moves the others to `.audiobook-fetch/duplicates/` inside the
-download folder. They are **moved, not deleted**: look there if you would
-have chosen differently, and empty the folder when you are happy.
-
-The best-sounding format is kept, going by bitrate weighted for how efficient
-the codec is (AAC and Opus need less than MP3 for the same sound). Among
-formats that sound as good as each other, a single M4B wins because it
-carries chapters, then the one in fewer files, then the smaller one. Formats
-of different lengths are never touched: a sample, a bonus track, or two
-halves of a book in different formats all stay.
-
-`-keep-one-format=false` keeps everything. It needs the check, since the
-check is what measures the files.
-
-### Without the audio tools
-
-Both tools are optional. Without `ffprobe` nothing is checked; without
-`ffmpeg`, `whisper-cli` or a model file the listening checks are skipped, and
-the tool says so. The model is `-whisper-model`, else `whisper_model` in the
-config, else `WHISPER_MODEL`, else the first `ggml-*.bin` in
-`~/.config/audiobook-fetch/models/`.
-
-### Sources
-
-Each book is searched in the order the sources are given, and a later source
-is only asked when the earlier ones gave no near-certain match; then the best
-listing across all of them wins.
-
-| Name | What it is |
-|------|------------|
-| `archive` | The Internet Archive's LibriVox collection: public-domain books read by volunteers, free to download |
-| `audiobookbay` | AudioBook Bay: audiobooks only, with author, edition, format and bitrate on each listing |
-| `knaben` | Knaben: one API over The Pirate Bay and other public trackers |
-| `piratebay` | The Pirate Bay directly; Knaben already covers it, so this is for when Knaben is down |
-
-**Downloaders.** A link is sent to the downloader that can fetch it:
-
-| Name | What it is |
-|------|------------|
-| `archive` | fetches Internet Archive items straight from archive.org over HTTPS; no account, and only the original audio and the cover are taken, not the re-encoded copies the Archive keeps beside them |
-| `torbox` | [TorBox](https://torbox.app), for every other link; needs an account and its API key |
-
-The Archive's links always go to `archive` whichever downloader is chosen,
-because a torrent service makes no headway with them. So a list can mix
-both kinds of book, and with no TorBox key the public-domain ones still
-arrive while the rest are reported as needing a key.
-
-The general trackers list a release name and little else, so edition, format,
-bitrate and language are read from the name where it says. They do report how
-many people are seeding, and a listing nobody is seeding is never picked.
-
-**A source refusing you?** Sources limit how fast one address may search.
-The tool stops after three failures in a row instead of grinding on; wait a
-while and run again, or raise `-delay`. `-search-proxy` sends searches (never
-downloads) through a proxy if your network needs one.
+- **Unpacks archives.** A book that arrives as a zip, rar or 7z is unpacked
+  and the archive deleted ([more](docs/behaviour.md#archives)).
+- **Checks the audio.** Playable, bitrate, spoken language, abridged or
+  dramatized. What is not the book is moved aside and the next-best listing
+  tried ([more](docs/behaviour.md#checking-what-came-down)).
+- **Keeps one format.** A book that came as an M4B and again as MP3s is cut
+  down to the best; the rest are moved aside, not deleted
+  ([more](docs/behaviour.md#the-same-book-in-several-formats)).
+- **Gives up on dead links.** A link nobody is seeding is dropped for the
+  book's next-best listing ([more](docs/behaviour.md#links-with-no-seeds)).
+- **Picks the right downloader.** Internet Archive books come straight from
+  the Archive; everything else goes through TorBox
+  ([more](docs/behaviour.md#sources)).
 
 ## The parts on their own
 
@@ -367,102 +270,26 @@ subfolder as one book and prints a verdict for each (`-json` for machines); it
 moves and deletes nothing, and exits non-zero if it would reject any.
 
 `tidy` does for books already in a folder what a download gets on arrival:
-[archives](#archives) are unpacked and deleted, and a book held in
-[several formats](#the-same-book-in-several-formats) is cut down to the best,
+[archives](docs/behaviour.md#archives) are unpacked and deleted, and a book held in
+[several formats](docs/behaviour.md#the-same-book-in-several-formats) is cut down to the best,
 with the others moved to the folder's `.audiobook-fetch/duplicates/`. Try it
 with `-dry-run` first to see what it would do, and use `-book NAME` to tidy
 only the folders whose name contains NAME.
 
-**Exit codes.** `0`: done. `1`: something needs attention (a download
+**Stopping.** Ctrl-C stops a run cleanly: downloads in flight keep what
+they have, and the same command carries on where it left off. Press it twice
+to stop at once.
+
+**Exit codes.** `0`: done. `130`: stopped with Ctrl-C. `1`: something needs attention (a download
 failed, searching stopped early, `check` would reject a book, `doctor` found
 something missing, or there was nothing to do). `2`: the command line was
 wrong.
 
 ## Extending
 
-Sources and downloaders are plugins: each is one Go package that implements
-a small interface and registers itself under a name. Nothing else in the
-code knows which ones exist. The work is two stages joined by a magnet link:
-
-```
-list ──▶ Source ──▶ best listing ──▶ magnet link ──▶ Downloader ──▶ files
-```
-
-Reading the list, scoring, choosing, and saving files resumably are shared.
-A source or downloader only has to speak to its own service.
-
-**A new source** is a package under `sources/` implementing three methods:
-
-```go
-type Source interface {
-    Name() string
-    Search(query string, page int) ([]*Candidate, error) // one results page
-    Details(c *Candidate) error                           // fill in the rest, incl. the info hash
-}
-```
-
-`fetch.NewFetcher` gives it paced, retried page fetches (and the proxy
-option) for free. `sources/audiobookbay` is the model to copy for a site read
-page by page, `sources/knaben` for one with a JSON API. `fetch.ParseRelease`
-unpacks a tracker's release name into heading, edition, format, bitrate and
-language.
-
-**A new downloader** is a package under `downloaders/` implementing:
-
-```go
-type Downloader interface {
-    Name() string
-    List() ([]Item, error)                                // everything in the account
-    CheckCached(hashes []string) (map[string]bool, error) // what it can serve at once
-    Add(magnet string) error
-    Link(item Item, file File) (string, error)            // a URL to download one file
-    Remove(item Item) error
-}
-```
-
-`downloaders/torbox` is the model for a service with an account, and
-`downloaders/archive` for one that serves files directly. An API key is read from
-`<NAME>_API_KEY` or `~/.config/audiobook-fetch/<name>.key`.
-
-Either one registers itself from `init` with `fetch.RegisterSource` or
-`fetch.RegisterDownloader`, and is switched on by adding a blank import to
-`cmd/audiobook-fetch/main.go`. Its name then works with `-source` or
-`-downloader` and in `config.json`. With several sources, each book is
-searched in the order given, and later sources are skipped once an earlier
-one yields a near-certain match.
-
-Plugins are compiled in, not loaded at run time, so a new one means building
-the tool yourself or sending a pull request.
-[CONTRIBUTING.md](CONTRIBUTING.md#writing-a-plugin) walks through writing and
-testing one.
-
-## Use from Go
-
-The package is usable as a library, but it is pre-1.0: names and signatures
-may still change between minor versions.
-
-```go
-import (
-    fetch "github.com/broots144/audiobook-fetch"
-    _ "github.com/broots144/audiobook-fetch/downloaders/torbox"
-    _ "github.com/broots144/audiobook-fetch/sources/archive"
-)
-
-source, _ := fetch.NewSource("archive", fetch.SourceConfig{Delay: 3 * time.Second})
-books, links := fetch.ParseList("Frankenstein | Mary Shelley")
-result := fetch.Find(books[0], []fetch.Source{source}, fetch.DefaultOptions())
-if result.Status == fetch.StatusMatched {
-    links = append(links, fetch.Magnet{Hash: result.Candidate.InfoHash, URI: result.Magnet})
-}
-
-service, _ := fetch.NewDownloader("torbox", apiKey)
-opts := fetch.DefaultDownloadOptions()
-opts.Dest = "/path/to/folder"
-results, err := fetch.Download(service, links, opts)
-```
-
-From any other language, run `find` or `download` with `-json -quiet`, or
-`check` with `-json`, and read stdout.
+Sources and downloaders are plugins: one Go package each, behind a small
+interface. [docs/extending.md](docs/extending.md) shows the interfaces, which
+existing package to copy, and how to use the whole thing as a Go library.
 
 ## Contributing
 

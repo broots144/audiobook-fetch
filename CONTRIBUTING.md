@@ -74,6 +74,7 @@ list ──▶ Source ──▶ best listing ──▶ magnet link ──▶ Dow
 | `sources/` | one package per place to search |
 | `downloaders/` | one package per download service |
 | `cmd/audiobook-fetch/` | the command line |
+| `docs/` | the detailed behaviour and the plugin guide the README links to |
 
 ## Writing a plugin
 
@@ -89,8 +90,8 @@ audio check); a plugin only has to speak to its own service.
 
 The steps are the same for both:
 
-1. **Implement the interface** in a new package. The README's
-   [Extending](README.md#extending) section lists the methods. A downloader
+1. **Implement the interface** in a new package.
+   [docs/extending.md](docs/extending.md) lists the methods. A downloader
    whose service queues links can also implement the optional `Queuer`.
 2. **Register it from `init`** under the name people will type:
 

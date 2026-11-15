@@ -13,6 +13,11 @@ before 1.0 the Go API may change between minor versions.
 - **The tool says who it is.** Sources are asked under the tool's own name
   instead of a browser's. AudioBook Bay is the exception, left as it was
   because a search under the new name could not be seen to work.
+- **Tested on macOS and Windows** as well as Linux, on every change. The
+  config folder is `%AppData%\audiobook-fetch` on Windows and honours
+  `XDG_CONFIG_HOME`; it is unchanged on macOS and Linux.
+- The README is shorter; the detailed behaviour and the plugin guide moved
+  to `docs/`.
 - A run killed while unpacking a zip no longer leaves a half-written file
   that blocks the next attempt, and the state is saved as soon as an
   archive is unpacked.
