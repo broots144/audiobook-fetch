@@ -3,7 +3,7 @@ module github.com/broots144/audiobook-fetch
 go 1.27
 
 require (
-	github.com/PuerkitoBio/goquery v1.13.0
+	github.com/PuerkitoBio/goquery v1.14.0
 	golang.org/x/text v0.44.0
 )
 
